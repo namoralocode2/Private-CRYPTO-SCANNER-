@@ -348,8 +348,8 @@ async def main():
             except Exception as e:
                 logging.error(f"Nie udało się zapisać wierszy w Google Sheets: {e}")
 
-        # PRZYCZYNA SPAMU NAPRAWIONA: Wykonuje się wyłącznie raz dziennie podczas uruchomienia o godzinie 21:00
-        if uk_now.hour == 21 and uk_now.minute < 15:
+        # Wysyłanie podsumowania raz na dobę po godzinie 21:00 (zabezpieczone plikiem cache)
+        if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
             if digest_lines:
                 digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU (KRYPTO - 21:00)**\n\n' + ''.join(digest_lines)
                 await send_telegram_alert_async(http_client, digest_msg)
