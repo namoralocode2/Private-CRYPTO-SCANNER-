@@ -33,7 +33,13 @@ ALT_CRYPTO = [
     'ONDO/USD', 'XRP/GBP', 'LINK/GBP', 
     'SUI/GBP', 'AAVE/GBP'
 ]
-SYMBOLS = CORE_CRYPTO + ALT_CRYPTO
+
+env_crypto = os.getenv('CRYPTO_PAIRS')
+if env_crypto:
+    SYMBOLS = [s.strip() for s in env_crypto.split(',') if s.strip()]
+else:
+    SYMBOLS = CORE_CRYPTO + ALT_CRYPTO
+
 CACHE_FILE = 'cache_krypto.json'
 
 exchange = ccxt.kraken({
@@ -275,13 +281,12 @@ async def main():
                 last_sent_rsi = ticker_cache.get('last_sent_rsi', 0.0)
 
                 current_epoch = time.time()
-                rsi_changed = abs(rsi_4h - last_sent_rsi) >= 1.0
 
+                # LOGIKA ANTY-SPAMOWA:
+                # Wysyła alert TYLKO wtedy, gdy pojawi się nowa zamknięta świeca 4H lub gdy stan zmieni się z NONE na sygnał kupna
                 should_alert = False
                 if current_signal_type != 'NONE':
                     if last_ts != ts_closed or last_sig != current_signal_type:
-                        should_alert = True
-                    elif rsi_changed and (current_epoch - last_alert_time >= 1800):
                         should_alert = True
 
                 signal_to_save = current_signal_type if current_signal_type != 'NONE' else (last_sig if last_ts == ts_closed else 'NONE')
@@ -328,10 +333,11 @@ async def main():
         write_github_step_summary(digest_summary_rows, health_msg=health_summary)
         await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
+        # Sekwencyjne wysyłanie alertów z pauzą 0.3s (ochrona przed limitami Telegrama HTTP 429)
         if pending_alerts:
-            alert_coroutines = []
             for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
-                alert_coroutines.append(send_telegram_alert_async(http_client, msg))
+                await send_telegram_alert_async(http_client, msg)
+                await asyncio.sleep(0.3)
                 rows_to_append_sheets.append([
                     now_str,
                     sym_disp,
@@ -339,7 +345,6 @@ async def main():
                     price_disp,
                     f"RSI: {rsi_val}"
                 ])
-            await asyncio.gather(*alert_coroutines)
 
         if sheet and rows_to_append_sheets:
             try:
@@ -348,7 +353,7 @@ async def main():
             except Exception as e:
                 logging.error(f"Nie udało się zapisać wierszy w Google Sheets: {e}")
 
-        # Wykonuje się wyłącznie o 21:03 (odcina spam w środowiskach bezstanowych)
+        # Raport wieczorny o 21:03
         if uk_now.hour == 21 and uk_now.minute < 15:
             if digest_lines:
                 digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU (KRYPTO - 21:00)**\n\n' + ''.join(digest_lines)
