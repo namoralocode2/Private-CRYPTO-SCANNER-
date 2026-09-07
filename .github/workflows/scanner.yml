@@ -9,6 +9,9 @@ concurrency:
   group: crypto-scanner-private
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
@@ -25,10 +28,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas ta ccxt httpx gspread oauth2client
+          pip install -r requirements.txt
 
       - name: Execute Crypto Scanner Script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+          CRYPTO_PAIRS: ${{ secrets.CRYPTO_PAIRS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python crypto_scanner.py
+
+      - name: Commit Cache Updates
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(cache): update crypto cache [skip ci]"
+          file_pattern: "cache_krypto.json"
