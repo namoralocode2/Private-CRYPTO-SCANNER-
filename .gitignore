@@ -1,8 +1,11 @@
-# Zmienne środowiskowe i klucze
+# Pliki środowiskowe i klucze
 .env
-*.json
+.env.local
 
-# Cache Pythona i lokalne bazy
+# Pliki tymczasowe Pythona
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .DS_Store
+.idea/
+.vscode/
