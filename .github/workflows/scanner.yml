@@ -37,7 +37,7 @@ jobs:
           CRYPTO_PAIRS: ${{ secrets.CRYPTO_PAIRS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: python crypto_scanner.py
+        run: python main.py
 
       - name: Commit Cache Updates
         uses: stefanzweifel/git-auto-commit-action@v5
