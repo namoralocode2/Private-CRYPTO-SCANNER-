@@ -1,71 +1,71 @@
 {
   "BTC/GBP": {
-    "signal": "NONE",
+    "signal": "BUY_REBOUND",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
-    "last_alert_time": 0.0,
-    "last_sent_rsi": 0.0
+    "ts_closed": 1788782400,
+    "last_alert_time": 1788796819.9538012,
+    "last_sent_rsi": 40.53
   },
   "ETH/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   },
   "SOL/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   },
   "TAO/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   },
   "RENDER/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   },
   "ONDO/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   },
   "XRP/GBP": {
-    "signal": "NONE",
+    "signal": "BUY_REBOUND",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
-    "last_alert_time": 0.0,
-    "last_sent_rsi": 0.0
+    "ts_closed": 1788782400,
+    "last_alert_time": 1788796827.1571782,
+    "last_sent_rsi": 40.25
   },
   "LINK/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   },
   "SUI/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   },
   "AAVE/GBP": {
     "signal": "NONE",
     "date": "2026-09-07",
-    "ts_closed": 1788768000,
+    "ts_closed": 1788782400,
     "last_alert_time": 0.0,
     "last_sent_rsi": 0.0
   }
