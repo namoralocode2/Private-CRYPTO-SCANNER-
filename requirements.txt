@@ -1,9 +1,7 @@
-yfinance 
-pandas 
-numpy
-requests
-gspread
-google-api-python-client
+pandas
 ccxt
 httpx
-
+gspread
+google-auth
+ta
+requests
