@@ -2,72 +2,72 @@
   "BTC/GBP": {
     "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789041822.1236432,
-    "last_sent_rsi": 37.48
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056217.3075511,
+    "last_sent_rsi": 31.39
   },
   "ETH/GBP": {
-    "signal": "NONE",
+    "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789013024.6423671,
-    "last_sent_rsi": 45.88
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056218.539024,
+    "last_sent_rsi": 37.1
   },
   "SOL/GBP": {
     "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789041824.5195205,
-    "last_sent_rsi": 38.41
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056219.6917548,
+    "last_sent_rsi": 32.63
   },
   "TAO/GBP": {
     "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789041825.6940053,
-    "last_sent_rsi": 48.14
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056220.8946264,
+    "last_sent_rsi": 39.31
   },
   "RENDER/GBP": {
     "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789041826.9080813,
-    "last_sent_rsi": 36.39
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056222.089134,
+    "last_sent_rsi": 34.54
   },
   "ONDO/GBP": {
     "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789041828.1024194,
-    "last_sent_rsi": 35.18
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056223.2864263,
+    "last_sent_rsi": 32.84
   },
   "XRP/GBP": {
-    "signal": "NONE",
+    "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1788825824.5868762,
-    "last_sent_rsi": 46.51
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056224.5026543,
+    "last_sent_rsi": 34.08
   },
   "LINK/GBP": {
     "signal": "NONE",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
+    "ts_closed": 1789041600,
     "last_alert_time": 1788998637.664844,
     "last_sent_rsi": 35.53
   },
   "SUI/GBP": {
     "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789041831.7066388,
-    "last_sent_rsi": 38.01
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056226.9041917,
+    "last_sent_rsi": 33.14
   },
   "AAVE/GBP": {
-    "signal": "NONE",
+    "signal": "BUY_REBOUND",
     "date": "2026-09-10",
-    "ts_closed": 1789027200,
-    "last_alert_time": 1789027431.663988,
-    "last_sent_rsi": 31.46
+    "ts_closed": 1789041600,
+    "last_alert_time": 1789056228.1053383,
+    "last_sent_rsi": 30.68
   },
   "DIGEST_DATE": "2026-09-09"
 }
