@@ -191,7 +191,7 @@ def calculate_indicators(df, min_wick_ratio=0.65, max_upper_wick_ratio=0.20):
 # --- 5. GŁÓWNA PĘTLA APLIKACJI ---
 async def main():
     start_time = time.time()
-    logging.info("Uruchamianie Skanera Krypto (Pełny Tryb Analityczny)...")
+    logging.info("Uruchamianie Skanera Krypto (Pełny Tryb Analityczny V2)...")
 
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
@@ -223,10 +223,17 @@ async def main():
 
                 df = calculate_indicators(df, min_wick_ratio=pinbar_threshold, max_upper_wick_ratio=0.20)
 
+                # Ocena OSTATNIO ZAMKNIĘTEJ świecy 4H (iloc[-2]) oraz przedostatniej (iloc[-3])
                 last_row = df.iloc[-2]
+                prev_row = df.iloc[-3]
+
                 price_native = float(last_row['close'])
                 rsi_4h = float(last_row['rsi'])
+                prev_rsi_4h = float(prev_row['rsi'])
+
                 is_pinbar = bool(last_row['pinbar'])
+                prev_pinbar = bool(prev_row['pinbar'])
+
                 ts_closed = int(last_row['timestamp'] / 1000)
 
                 vol_target = last_row['volume']
@@ -274,53 +281,48 @@ async def main():
                     'status': status_txt, 'tv_symbol': tv_clean_symbol
                 })
 
-                ticker_cache = cache.get(symbol_display, {})
-                last_sig = ticker_cache.get('signal', 'NONE')
-                last_ts = ticker_cache.get('ts_closed', 0)
-                last_alert_time = ticker_cache.get('last_alert_time', 0.0)
-                last_sent_rsi = ticker_cache.get('last_sent_rsi', 0.0)
+                # --- BEZPIECZNA LOGIKA ZAPOBIEGANIA DUPLIKATOM ALERTÓW ---
+                github_event = os.getenv('GITHUB_EVENT_NAME', '')
 
-                current_epoch = time.time()
-
-                # LOGIKA ANTY-SPAMOWA:
-                # Wysyła alert TYLKO wtedy, gdy pojawi się nowa zamknięta świeca 4H lub gdy stan zmieni się z NONE na sygnał kupna
-                should_alert = False
                 if current_signal_type != 'NONE':
-                    if last_ts != ts_closed or last_sig != current_signal_type:
-                        should_alert = True
+                    candle_key = f"ALERT_{symbol_display}_{ts_closed}_{current_signal_type}"
+                    already_alerted = (cache.get(candle_key) is not None)
 
-                signal_to_save = current_signal_type if current_signal_type != 'NONE' else (last_sig if last_ts == ts_closed else 'NONE')
+                    # Sprawdzenie czy na poprzedniej świecy sygnał NIE występował (Crossover)
+                    is_new_signal = False
+                    if current_signal_type == 'BUY_REBOUND':
+                        prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_row['low'] <= prev_row['bb_lower'])
+                        is_new_signal = not prev_was_rebound
+                    elif current_signal_type == 'BUY_PINBAR':
+                        prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
+                        is_new_signal = not prev_was_pinbar
 
-                if should_alert:
-                    tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
+                    should_alert = not already_alerted and (is_new_signal or github_event != 'schedule')
 
-                    confirmations = []
-                    if is_pinbar:
-                        confirmations.append(f"🕯️ **Knot popytowy na świecy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
-                    if last_row['low'] <= last_row['bb_lower']:
-                        confirmations.append("📉 **Test dolnej Wstęgi Bollingera (20, 2)**")
-                    confirmations.append(f"📊 **Wolumen:** {volume_str}")
+                    if should_alert:
+                        tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
 
-                    conf_msg = "\n" + "\n".join(confirmations)
+                        confirmations = []
+                        if is_pinbar:
+                            confirmations.append(f"🕯️ **Knot popytowy na świecy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
+                        if last_row['low'] <= last_row['bb_lower']:
+                            confirmations.append("📉 **Test dolnej Wstęgi Bollingera (20, 2)**")
+                        confirmations.append(f"📊 **Wolumen:** {volume_str}")
 
-                    body = (
-                        f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING)**\n\n"
-                        f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
-                        f"💰 **Cena:** `{price_disp}`\n"
-                        f"📊 **RSI (4H):** `{rsi_4h}`{conf_msg}\n\n"
-                        f"👁 **Oceń wykres i dołek knota:**\n"
-                        f"🔗 📈 [Zobacz wykres na TradingView]({tv_link})"
-                    )
+                        conf_msg = "\n" + "\n".join(confirmations)
 
-                    pending_alerts.append((body, symbol_display, status_txt, price_disp, rsi_4h))
+                        body = (
+                            f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING)**\n\n"
+                            f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
+                            f"💰 **Cena:** `{price_disp}`\n"
+                            f"📊 **RSI (4H):** `{rsi_4h}`{conf_msg}\n\n"
+                            f"👁 **Oceń wykres i dołek knota:**\n"
+                            f"🔗 📈 [Zobacz wykres na TradingView]({tv_link})"
+                        )
 
-                cache[symbol_display] = {
-                    'signal': signal_to_save,
-                    'date': today_str,
-                    'ts_closed': ts_closed,
-                    'last_alert_time': current_epoch if should_alert else last_alert_time,
-                    'last_sent_rsi': rsi_4h if should_alert else last_sent_rsi
-                }
+                        pending_alerts.append((body, symbol_display, status_txt, price_disp, rsi_4h))
+                        cache[candle_key] = True
+
                 success_count += 1
 
             except Exception as e:
@@ -353,8 +355,8 @@ async def main():
             except Exception as e:
                 logging.error(f"Nie udało się zapisać wierszy w Google Sheets: {e}")
 
-        # Raport wieczorny o 21:03
-        if uk_now.hour == 21 and uk_now.minute < 15:
+        # Raport wieczorny po 21:00
+        if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
             if digest_lines:
                 digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU (KRYPTO - 21:00)**\n\n' + ''.join(digest_lines)
                 await send_telegram_alert_async(http_client, digest_msg)
