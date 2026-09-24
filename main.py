@@ -254,8 +254,12 @@ async def main():
 
                 price_disp = f"£{price_gbp:.2f}" if price_gbp >= 1.0 else f"£{price_gbp:.4f}"
 
+                # --- POPRAWIONA LOGIKA WARUNKÓW ---
+                bb_touched = last_row['low'] <= last_row['bb_lower']
+                max_rsi_for_bb = 45.0  # Filtr zapobiegający alertom przy wysokim RSI mimo knotu do BB
+
                 current_signal_type = 'NONE'
-                if (rsi_4h <= rsi_signal_threshold) or (last_row['low'] <= last_row['bb_lower']):
+                if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= max_rsi_for_bb):
                     current_signal_type = 'BUY_REBOUND'
                 elif is_pinbar and rsi_4h <= max_pinbar_rsi:
                     current_signal_type = 'BUY_PINBAR'
@@ -281,23 +285,22 @@ async def main():
                     'status': status_txt, 'tv_symbol': tv_clean_symbol
                 })
 
-                # --- BEZPIECZNA LOGIKA ZAPOBIEGANIA DUPLIKATOM ALERTÓW ---
-                github_event = os.getenv('GITHUB_EVENT_NAME', '')
-
+                # --- POPRAWIONA LOGIKA BEZPIECZEŃSTWA ALERTÓW ---
                 if current_signal_type != 'NONE':
                     candle_key = f"ALERT_{symbol_display}_{ts_closed}_{current_signal_type}"
                     already_alerted = (cache.get(candle_key) is not None)
 
-                    # Sprawdzenie czy na poprzedniej świecy sygnał NIE występował (Crossover)
+                    # Sprawdzenie crossovera (czy na poprzedniej świecy sygnał NIE występował)
                     is_new_signal = False
                     if current_signal_type == 'BUY_REBOUND':
-                        prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_row['low'] <= prev_row['bb_lower'])
+                        prev_bb_touched = prev_row['low'] <= prev_row['bb_lower']
+                        prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_bb_touched and prev_rsi_4h <= max_rsi_for_bb)
                         is_new_signal = not prev_was_rebound
                     elif current_signal_type == 'BUY_PINBAR':
                         prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
                         is_new_signal = not prev_was_pinbar
 
-                    should_alert = not already_alerted and (is_new_signal or github_event != 'schedule')
+                    should_alert = not already_alerted and is_new_signal
 
                     if should_alert:
                         tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
@@ -305,8 +308,8 @@ async def main():
                         confirmations = []
                         if is_pinbar:
                             confirmations.append(f"🕯️ **Knot popytowy na świecy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
-                        if last_row['low'] <= last_row['bb_lower']:
-                            confirmations.append("📉 **Test dolnej Wstęgi Bollingera (20, 2)**")
+                        if bb_touched:
+                            confirmations.append("📉 **Knot świecy przetestował dolną Wstęgę Bollingera (20, 2)**")
                         confirmations.append(f"📊 **Wolumen:** {volume_str}")
 
                         conf_msg = "\n" + "\n".join(confirmations)
