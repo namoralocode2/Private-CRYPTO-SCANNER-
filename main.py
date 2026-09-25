@@ -180,6 +180,14 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     rs = avg_gain / avg_loss
     df['rsi'] = round(100 - (100 / (1 + rs)), 2)
     
+    # --- STOCHASTIC RSI (14, 14, 3, 3) ---
+    stoch_period = 14
+    rsi_min = df['rsi'].rolling(window=stoch_period).min()
+    rsi_max = df['rsi'].rolling(window=stoch_period).max()
+    stoch_rsi = (df['rsi'] - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
+    df['stoch_k'] = round(stoch_rsi.rolling(window=3).mean(), 2)
+    df['stoch_d'] = round(df['stoch_k'].rolling(window=3).mean(), 2)
+    
     df['sma20'] = df['close'].rolling(window=20).mean()
     df['std20'] = df['close'].rolling(window=20).std()
     df['bb_upper'] = df['sma20'] + (df['std20'] * 2)
@@ -202,10 +210,147 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     return df
 
 
+async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
+    """Pobiera i analizuje dane dla pojedynczej monety (wykonywane równolegle)."""
+    try:
+        is_core = symbol in CORE_CRYPTO
+        crypto_icon = '🏛️' if is_core else '🚀'
+        
+        pinbar_threshold = 0.50 if is_core else 0.60
+        rsi_signal_threshold = 35.0 if is_core else 33.0
+        max_pinbar_rsi = 42.0 if is_core else 38.0
+        
+        df = await fetch_ohlcv_async(symbol)
+        if df is None or len(df) < 25:
+            return None
+
+        df = calculate_indicators(df, min_wick_ratio=pinbar_threshold, max_upper_wick_ratio=0.20)
+
+        last_row = df.iloc[-2]
+        prev_row = df.iloc[-3]
+
+        price_native = float(last_row['close'])
+        rsi_4h = float(last_row['rsi'])
+        prev_rsi_4h = float(prev_row['rsi'])
+
+        stoch_k = float(last_row['stoch_k'])
+        prev_stoch_k = float(prev_row['stoch_k'])
+        stoch_turning_up = (prev_stoch_k <= 25.0 or stoch_k <= 25.0) and (stoch_k > prev_stoch_k)
+
+        is_pinbar = bool(last_row['pinbar'])
+        prev_pinbar = bool(prev_row['pinbar'])
+
+        ts_closed = int(last_row['timestamp'] / 1000)
+
+        vol_target = last_row['volume']
+        vol_sma = last_row['vol_sma20']
+        volume_str = "Standardowy"
+        if pd.notna(vol_sma) and vol_sma > 0:
+            vol_ratio = int((vol_target / vol_sma) * 100)
+            volume_str = f"{vol_ratio}% średniej {'🟢 (Wysoki)' if vol_ratio >= 120 else ('🔴 (Niski)' if vol_ratio <= 80 else '🟡 (Standard)')}"
+
+        tv_clean_symbol = symbol.replace("/", "")
+
+        if 'USD' in symbol:
+            price_gbp = price_native * usd_to_gbp
+            symbol_display = symbol.replace('USD', 'GBP')
+        else:
+            price_gbp = price_native
+            symbol_display = symbol
+
+        price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
+
+        # --- LOGIKA WARUNKÓW ---
+        bb_touched = last_row['low'] <= last_row['bb_lower']
+        max_rsi_for_bb = 45.0
+
+        current_signal_type = 'NONE'
+        if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= max_rsi_for_bb):
+            current_signal_type = 'BUY_REBOUND'
+        elif is_pinbar and rsi_4h <= max_pinbar_rsi:
+            current_signal_type = 'BUY_PINBAR'
+
+        status_map = {
+            'NONE': '⚪ Neutralny',
+            'BUY_REBOUND': '⚡️ SZYBKIE ODBICIE',
+            'BUY_PINBAR': '🕯️ PINBAR ODBICIE'
+        }
+        status_txt = status_map.get(current_signal_type, '⚪ Neutralny')
+        pinbar_txt = f"Pinbar {int(pinbar_threshold * 100)}%" if is_pinbar else "Brak"
+
+        tv_link_symbol = f"[{symbol_display}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol})"
+
+        digest_line = (
+            f"{crypto_icon} {tv_link_symbol}: `{price_disp}`\n"
+            f"├ RSI (4H): `{rsi_4h}` | {pinbar_txt}\n"
+            f"└ Stan: {status_txt}\n\n"
+        )
+        digest_summary_row = {
+            'symbol': symbol_display, 'icon': crypto_icon,
+            'price': price_disp, 'rsi': rsi_4h, 'pinbar': pinbar_txt,
+            'status': status_txt, 'tv_symbol': tv_clean_symbol
+        }
+
+        pending_alert = None
+        candle_key = None
+
+        if current_signal_type != 'NONE':
+            candle_key = f"ALERT_{symbol_display}_{ts_closed}_{current_signal_type}"
+            already_alerted = (cache.get(candle_key) is not None)
+
+            is_new_signal = False
+            if current_signal_type == 'BUY_REBOUND':
+                prev_bb_touched = prev_row['low'] <= prev_row['bb_lower']
+                prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_bb_touched and prev_rsi_4h <= max_rsi_for_bb)
+                is_new_signal = not prev_was_rebound
+            elif current_signal_type == 'BUY_PINBAR':
+                prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
+                is_new_signal = not prev_was_pinbar
+
+            should_alert = not already_alerted and is_new_signal
+
+            if should_alert:
+                tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
+
+                confirmations = []
+                if is_pinbar:
+                    confirmations.append(f"🕯️ **Knot popytowy na świecy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
+                if bb_touched:
+                    confirmations.append("📉 **Knot świecy przetestował dolną Wstęgę Bollingera (20, 2)**")
+                if stoch_turning_up:
+                    confirmations.append(f"🔄 **Stochastic RSI wygina się w górę z wyprzedania (%K: `{stoch_k}`)**")
+                confirmations.append(f"📊 **Wolumen:** {volume_str}")
+
+                conf_msg = "\n" + "\n".join(confirmations)
+
+                body = (
+                    f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING)**\n"
+                    f"───────────────────\n"
+                    f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
+                    f"💰 **Cena:** `{price_disp}`\n"
+                    f"📊 **RSI (4H):** `{rsi_4h}`{conf_msg}\n\n"
+                    f"👁 **Oceń wykres i dołek knota:**\n"
+                    f"📈 [Zobacz wykres na TradingView]({tv_link})"
+                )
+
+                pending_alert = (body, symbol_display, status_txt, price_disp, rsi_4h)
+
+        return {
+            'digest_line': digest_line,
+            'digest_summary_row': digest_summary_row,
+            'pending_alert': pending_alert,
+            'candle_key': candle_key
+        }
+
+    except Exception as e:
+        logging.error(f"Błąd dla {symbol}: {e}")
+        return None
+
+
 # --- 5. GŁÓWNA PĘTLA APLIKACJI ---
 async def main():
     start_time = time.time()
-    logging.info("Uruchamianie Skanera Krypto (Pełny Tryb Analityczny V2)...")
+    logging.info("Uruchamianie Skanera Krypto (Tryb Równoległy V2)...")
 
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
@@ -222,129 +367,21 @@ async def main():
     success_count = 0
 
     async with httpx.AsyncClient() as http_client:
-        for symbol in SYMBOLS:
-            try:
-                is_core = symbol in CORE_CRYPTO
-                crypto_icon = '🏛️' if is_core else '🚀'
-                
-                pinbar_threshold = 0.50 if is_core else 0.60
-                rsi_signal_threshold = 35.0 if is_core else 33.0
-                max_pinbar_rsi = 42.0 if is_core else 38.0
-                
-                df = await fetch_ohlcv_async(symbol)
-                if df is None or len(df) < 25:
-                    continue
+        # --- RÓWNOLEGŁE POBIERANIE I ANALIZA SYMBOLI ---
+        tasks = [process_symbol(symbol, usd_to_gbp, cache) for symbol in SYMBOLS]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                df = calculate_indicators(df, min_wick_ratio=pinbar_threshold, max_upper_wick_ratio=0.20)
+        for res in results:
+            if isinstance(res, Exception) or res is None:
+                continue
 
-                # Ocena OSTATNIO ZAMKNIĘTEJ świecy 4H (iloc[-2]) oraz przedostatniej (iloc[-3])
-                last_row = df.iloc[-2]
-                prev_row = df.iloc[-3]
+            success_count += 1
+            digest_lines.append(res['digest_line'])
+            digest_summary_rows.append(res['digest_summary_row'])
 
-                price_native = float(last_row['close'])
-                rsi_4h = float(last_row['rsi'])
-                prev_rsi_4h = float(prev_row['rsi'])
-
-                is_pinbar = bool(last_row['pinbar'])
-                prev_pinbar = bool(prev_row['pinbar'])
-
-                ts_closed = int(last_row['timestamp'] / 1000)
-
-                vol_target = last_row['volume']
-                vol_sma = last_row['vol_sma20']
-                volume_str = "Standardowy"
-                if pd.notna(vol_sma) and vol_sma > 0:
-                    vol_ratio = int((vol_target / vol_sma) * 100)
-                    volume_str = f"{vol_ratio}% średniej {'🟢 (Wysoki)' if vol_ratio >= 120 else ('🔴 (Niski)' if vol_ratio <= 80 else '🟡 (Standard)')}"
-
-                tv_clean_symbol = symbol.replace("/", "")
-
-                if 'USD' in symbol:
-                    price_gbp = price_native * usd_to_gbp
-                    symbol_display = symbol.replace('USD', 'GBP')
-                else:
-                    price_gbp = price_native
-                    symbol_display = symbol
-
-                price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
-
-                # --- POPRAWIONA LOGIKA WARUNKÓW ---
-                bb_touched = last_row['low'] <= last_row['bb_lower']
-                max_rsi_for_bb = 45.0  # Filtr zapobiegający alertom przy wysokim RSI mimo knotu do BB
-
-                current_signal_type = 'NONE'
-                if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= max_rsi_for_bb):
-                    current_signal_type = 'BUY_REBOUND'
-                elif is_pinbar and rsi_4h <= max_pinbar_rsi:
-                    current_signal_type = 'BUY_PINBAR'
-
-                status_map = {
-                    'NONE': '⚪ Neutralny',
-                    'BUY_REBOUND': '⚡️ SZYBKIE ODBICIE',
-                    'BUY_PINBAR': '🕯️ PINBAR ODBICIE'
-                }
-                status_txt = status_map.get(current_signal_type, '⚪ Neutralny')
-                pinbar_txt = f"Pinbar {int(pinbar_threshold * 100)}%" if is_pinbar else "Brak"
-
-                tv_link_symbol = f"[{symbol_display}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol})"
-
-                digest_lines.append(
-                    f"{crypto_icon} {tv_link_symbol}: `{price_disp}`\n"
-                    f"├ RSI (4H): `{rsi_4h}` | {pinbar_txt}\n"
-                    f"└ Stan: {status_txt}\n\n"
-                )
-                digest_summary_rows.append({
-                    'symbol': symbol_display, 'icon': crypto_icon,
-                    'price': price_disp, 'rsi': rsi_4h, 'pinbar': pinbar_txt,
-                    'status': status_txt, 'tv_symbol': tv_clean_symbol
-                })
-
-                # --- POPRAWIONA LOGIKA BEZPIECZEŃSTWA ALERTÓW ---
-                if current_signal_type != 'NONE':
-                    candle_key = f"ALERT_{symbol_display}_{ts_closed}_{current_signal_type}"
-                    already_alerted = (cache.get(candle_key) is not None)
-
-                    # Sprawdzenie crossovera (czy na poprzedniej świecy sygnał NIE występował)
-                    is_new_signal = False
-                    if current_signal_type == 'BUY_REBOUND':
-                        prev_bb_touched = prev_row['low'] <= prev_row['bb_lower']
-                        prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_bb_touched and prev_rsi_4h <= max_rsi_for_bb)
-                        is_new_signal = not prev_was_rebound
-                    elif current_signal_type == 'BUY_PINBAR':
-                        prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
-                        is_new_signal = not prev_was_pinbar
-
-                    should_alert = not already_alerted and is_new_signal
-
-                    if should_alert:
-                        tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
-
-                        confirmations = []
-                        if is_pinbar:
-                            confirmations.append(f"🕯️ **Knot popytowy na świecy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
-                        if bb_touched:
-                            confirmations.append("📉 **Knot świecy przetestował dolną Wstęgę Bollingera (20, 2)**")
-                        confirmations.append(f"📊 **Wolumen:** {volume_str}")
-
-                        conf_msg = "\n" + "\n".join(confirmations)
-
-                        body = (
-                            f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING)**\n"
-                            f"───────────────────\n"
-                            f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
-                            f"💰 **Cena:** `{price_disp}`\n"
-                            f"📊 **RSI (4H):** `{rsi_4h}`{conf_msg}\n\n"
-                            f"👁 **Oceń wykres i dołek knota:**\n"
-                            f"📈 [Zobacz wykres na TradingView]({tv_link})"
-                        )
-
-                        pending_alerts.append((body, symbol_display, status_txt, price_disp, rsi_4h))
-                        cache[candle_key] = True
-
-                success_count += 1
-
-            except Exception as e:
-                logging.error(f"Błąd dla {symbol}: {e}")
+            if res['pending_alert'] and res['candle_key']:
+                pending_alerts.append(res['pending_alert'])
+                cache[res['candle_key']] = True
 
         elapsed = round(time.time() - start_time, 2)
         health_summary = f"🩺 **Autodiagnostyka Krypto:** Przeanalizowano `{success_count}/{len(SYMBOLS)}` monet w `{elapsed}s`."
@@ -353,7 +390,6 @@ async def main():
         write_github_step_summary(digest_summary_rows, health_msg=health_summary)
         await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
-        # Sekwencyjne wysyłanie alertów z pauzą 0.3s (ochrona przed limitami Telegrama HTTP 429)
         if pending_alerts:
             for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
                 await send_telegram_alert_async(http_client, msg)
@@ -373,7 +409,6 @@ async def main():
             except Exception as e:
                 logging.error(f"Nie udało się zapisać wierszy w Google Sheets: {e}")
 
-        # Raport wieczorny po 21:00
         if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
             if digest_lines:
                 digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU (KRYPTO - 21:00)**\n───────────────────\n\n' + ''.join(digest_lines)
