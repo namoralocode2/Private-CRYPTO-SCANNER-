@@ -74,9 +74,22 @@ def load_cache():
 
 def save_cache(cache_data):
     try:
+        now_ts = int(time.time())
+        retention_period = 14 * 86400  # Czyszczenie alertów starszych niż 14 dni
+
+        cleaned_cache = {}
+        for k, v in cache_data.items():
+            if k.startswith("ALERT_"):
+                parts = k.split("_")
+                if len(parts) >= 3 and parts[-2].isdigit():
+                    ts = int(parts[-2])
+                    if now_ts - ts > retention_period:
+                        continue
+            cleaned_cache[k] = v
+
         dir_name = os.path.dirname(os.path.abspath(CACHE_FILE)) or "."
         with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, encoding="utf-8") as tf:
-            json.dump(cache_data, tf, indent=2, ensure_ascii=False)
+            json.dump(cleaned_cache, tf, indent=2, ensure_ascii=False)
             temp_name = tf.name
         os.replace(temp_name, CACHE_FILE)
     except Exception as e:
@@ -156,7 +169,7 @@ async def get_gbp_rate_async():
     except Exception:
         return 0.79
 
-def calculate_indicators(df, min_wick_ratio=0.65, max_upper_wick_ratio=0.20):
+def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -214,8 +227,8 @@ async def main():
                 is_core = symbol in CORE_CRYPTO
                 crypto_icon = '🏛️' if is_core else '🚀'
                 
-                pinbar_threshold = 0.50 if is_core else 0.65
-                rsi_signal_threshold = 35.0 if is_core else 30.0
+                pinbar_threshold = 0.50 if is_core else 0.60
+                rsi_signal_threshold = 35.0 if is_core else 33.0
                 max_pinbar_rsi = 42.0 if is_core else 38.0
                 
                 df = await fetch_ohlcv_async(symbol)
