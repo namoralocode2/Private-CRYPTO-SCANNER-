@@ -31,7 +31,7 @@ CORE_CRYPTO = ['BTC/GBP', 'ETH/GBP']
 ALT_CRYPTO = [
     'SOL/GBP', 'TAO/USD', 'RENDER/USD', 
     'ONDO/USD', 'XRP/GBP', 'LINK/GBP', 
-    'SUI/GBP', 'AAVE/GBP'
+    'SUI/GBP', 'AAVE/GBP', 'FET/USD'
 ]
 
 env_crypto = os.getenv('CRYPTO_PAIRS')
