@@ -139,12 +139,12 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                 chat_id = msg_obj.get("chat", {}).get("id")
 
                 if text.startswith(("/status", "/stan", "/start")):
-                    status_msg = "📋 **AKTUALNY STAN RYNKU (KRYPTO)**\n\n"
+                    status_msg = "📋 **AKTUALNY STAN RYNKU (KRYPTO)**\n───────────────────\n\n"
                     for r in digest_rows:
                         sym_disp = r['symbol']
                         tv_sym = r.get('tv_symbol', sym_disp.replace("/", ""))
                         tv_link = f"[{sym_disp}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_sym})"
-                        status_msg += f"{r['icon']} {tv_link}: {r['price']}\n├ RSI (4H): {r['rsi']} | {r['pinbar']}\n└ Stan: {r['status']}\n\n"
+                        status_msg += f"{r['icon']} {tv_link}: `{r['price']}`\n├ RSI (4H): `{r['rsi']}` | {r['pinbar']}\n└ Stan: {r['status']}\n\n"
                     target_chat = chat_id or TELEGRAM_CHAT_ID
                     if target_chat:
                         await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
@@ -266,7 +266,7 @@ async def main():
                     price_gbp = price_native
                     symbol_display = symbol
 
-                price_disp = f"£{price_gbp:.2f}" if price_gbp >= 1.0 else f"£{price_gbp:.4f}"
+                price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
 
                 # --- POPRAWIONA LOGIKA WARUNKÓW ---
                 bb_touched = last_row['low'] <= last_row['bb_lower']
@@ -329,12 +329,13 @@ async def main():
                         conf_msg = "\n" + "\n".join(confirmations)
 
                         body = (
-                            f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING)**\n\n"
+                            f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING)**\n"
+                            f"───────────────────\n"
                             f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
                             f"💰 **Cena:** `{price_disp}`\n"
                             f"📊 **RSI (4H):** `{rsi_4h}`{conf_msg}\n\n"
                             f"👁 **Oceń wykres i dołek knota:**\n"
-                            f"🔗 📈 [Zobacz wykres na TradingView]({tv_link})"
+                            f"📈 [Zobacz wykres na TradingView]({tv_link})"
                         )
 
                         pending_alerts.append((body, symbol_display, status_txt, price_disp, rsi_4h))
@@ -375,7 +376,7 @@ async def main():
         # Raport wieczorny po 21:00
         if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
             if digest_lines:
-                digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU (KRYPTO - 21:00)**\n\n' + ''.join(digest_lines)
+                digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU (KRYPTO - 21:00)**\n───────────────────\n\n' + ''.join(digest_lines)
                 await send_telegram_alert_async(http_client, digest_msg)
                 cache['DIGEST_DATE'] = today_str
 
