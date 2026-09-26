@@ -75,7 +75,7 @@ def load_cache():
 def save_cache(cache_data):
     try:
         now_ts = int(time.time())
-        retention_period = 14 * 86400  # Czyszczenie alertów starszych niż 14 dni
+        retention_period = 14 * 86400
 
         cleaned_cache = {}
         for k, v in cache_data.items():
@@ -144,7 +144,12 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                         sym_disp = r['symbol']
                         tv_sym = r.get('tv_symbol', sym_disp.replace("/", ""))
                         tv_link = f"[{sym_disp}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_sym})"
-                        status_msg += f"{r['icon']} {tv_link}: `{r['price']}`\n├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'Brak SMA 200')} | {r['pinbar']}\n└ Stan: {r['status']}\n\n"
+                        status_msg += (
+                            f"{r['icon']} {tv_link}: `{r['price']}`\n"
+                            f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'Brak SMA 200')}\n"
+                            f"├ Pinbar: {r['pinbar']}\n"
+                            f"└ Stan: {r['status']}\n\n"
+                        )
                     target_chat = chat_id or TELEGRAM_CHAT_ID
                     if target_chat:
                         await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
@@ -283,13 +288,14 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
             'BUY_PINBAR': '🕯️ PINBAR ODBICIE'
         }
         status_txt = status_map.get(current_signal_type, '⚪ Neutralny')
-        pinbar_txt = f"Pinbar {int(pinbar_threshold * 100)}%" if is_pinbar else "Brak"
+        pinbar_txt = f"{int(pinbar_threshold * 100)}%" if is_pinbar else "Brak"
 
         tv_link_symbol = f"[{symbol_display}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol})"
 
         digest_line = (
             f"{crypto_icon} {tv_link_symbol}: `{price_disp}`\n"
-            f"├ RSI (4H): `{rsi_4h}` | {sma200_txt} | {pinbar_txt}\n"
+            f"├ RSI (4H): `{rsi_4h}` | {sma200_txt}\n"
+            f"├ Pinbar: {pinbar_txt}\n"
             f"└ Stan: {status_txt}\n\n"
         )
         digest_summary_row = {
