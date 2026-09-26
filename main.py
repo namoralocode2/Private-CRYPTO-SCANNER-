@@ -355,6 +355,7 @@ async def main():
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
     now_str = uk_now.strftime('%Y-%m-%d %H:%M')
+    github_event = os.getenv('GITHUB_EVENT_NAME', '')
 
     sheet = init_google_sheet()
     cache = load_cache()
@@ -389,6 +390,11 @@ async def main():
 
         write_github_step_summary(digest_summary_rows, health_msg=health_summary)
         await process_telegram_commands_async(http_client, cache, digest_summary_rows)
+
+        # --- OBSŁUGA RĘCZNEGO URUCHOMIENIA WORKFLOW ---
+        if github_event == 'workflow_dispatch' and digest_lines:
+            manual_digest_msg = '🎯 **RĘCZNY SKAN RYNKU (KRYPTO)**\n───────────────────\n\n' + ''.join(digest_lines)
+            await send_telegram_alert_async(http_client, manual_digest_msg)
 
         if pending_alerts:
             for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
