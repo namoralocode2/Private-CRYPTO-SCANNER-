@@ -144,7 +144,7 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                         sym_disp = r['symbol']
                         tv_sym = r.get('tv_symbol', sym_disp.replace("/", ""))
                         tv_link = f"[{sym_disp}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_sym})"
-                        status_msg += f"{r['icon']} {tv_link}: `{r['price']}`\n├ RSI (4H): `{r['rsi']}` | {r['pinbar']}\n└ Stan: {r['status']}\n\n"
+                        status_msg += f"{r['icon']} {tv_link}: `{r['price']}`\n├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'Brak SMA 200')} | {r['pinbar']}\n└ Stan: {r['status']}\n\n"
                     target_chat = chat_id or TELEGRAM_CHAT_ID
                     if target_chat:
                         await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
@@ -153,7 +153,7 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
 
 
 # --- 4. ANALIZA TECHNICZNA I DANE ---
-async def fetch_ohlcv_async(symbol, timeframe='4h', limit=100):
+async def fetch_ohlcv_async(symbol, timeframe='4h', limit=250):
     try:
         ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -189,6 +189,7 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     df['stoch_d'] = round(df['stoch_k'].rolling(window=3).mean(), 2)
     
     df['sma20'] = df['close'].rolling(window=20).mean()
+    df['sma200'] = df['close'].rolling(window=200).mean()
     df['std20'] = df['close'].rolling(window=20).std()
     df['bb_upper'] = df['sma20'] + (df['std20'] * 2)
     df['bb_lower'] = df['sma20'] - (df['std20'] * 2)
@@ -221,7 +222,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
         max_pinbar_rsi = 42.0 if is_core else 38.0
         
         df = await fetch_ohlcv_async(symbol)
-        if df is None or len(df) < 25:
+        if df is None or len(df) < 205:
             return None
 
         df = calculate_indicators(df, min_wick_ratio=pinbar_threshold, max_upper_wick_ratio=0.20)
@@ -232,6 +233,12 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
         price_native = float(last_row['close'])
         rsi_4h = float(last_row['rsi'])
         prev_rsi_4h = float(prev_row['rsi'])
+
+        sma200_val = last_row['sma200']
+        if pd.notna(sma200_val):
+            sma200_txt = "Powyżej SMA 200" if price_native >= sma200_val else "Poniżej SMA 200"
+        else:
+            sma200_txt = "Brak SMA 200"
 
         stoch_k = float(last_row['stoch_k'])
         prev_stoch_k = float(prev_row['stoch_k'])
@@ -282,12 +289,12 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
 
         digest_line = (
             f"{crypto_icon} {tv_link_symbol}: `{price_disp}`\n"
-            f"├ RSI (4H): `{rsi_4h}` | {pinbar_txt}\n"
+            f"├ RSI (4H): `{rsi_4h}` | {sma200_txt} | {pinbar_txt}\n"
             f"└ Stan: {status_txt}\n\n"
         )
         digest_summary_row = {
             'symbol': symbol_display, 'icon': crypto_icon,
-            'price': price_disp, 'rsi': rsi_4h, 'pinbar': pinbar_txt,
+            'price': price_disp, 'rsi': rsi_4h, 'sma200': sma200_txt, 'pinbar': pinbar_txt,
             'status': status_txt, 'tv_symbol': tv_clean_symbol
         }
 
@@ -313,6 +320,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
                 tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
 
                 confirmations = []
+                confirmations.append(f"📈 **Trend główny:** {sma200_txt}")
                 if is_pinbar:
                     confirmations.append(f"🕯️ **Knot popytowy na świecy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
                 if bb_touched:
