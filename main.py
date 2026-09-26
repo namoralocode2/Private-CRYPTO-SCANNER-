@@ -139,7 +139,7 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                 chat_id = msg_obj.get("chat", {}).get("id")
 
                 if text.startswith(("/status", "/stan", "/start")):
-                    status_msg = "📋 **AKTUALNY STAN RYNKU (KRYPTO)**\n───────────────────\n\n"
+                    status_msg = "📋 **AKTUALNY STAN RYNKU KRYPTO**\n───────────────────\n\n"
                     for r in digest_rows:
                         sym_disp = r['symbol']
                         tv_sym = r.get('tv_symbol', sym_disp.replace("/", ""))
@@ -393,7 +393,7 @@ async def main():
 
         # --- OBSŁUGA RĘCZNEGO URUCHOMIENIA WORKFLOW ---
         if github_event == 'workflow_dispatch' and digest_lines:
-            manual_digest_msg = '🎯 **RĘCZNY SKAN RYNKU (KRYPTO)**\n───────────────────\n\n' + ''.join(digest_lines)
+            manual_digest_msg = '🎯 **RĘCZNY SKAN RYNKU KRYPTO**\n───────────────────\n\n' + ''.join(digest_lines)
             await send_telegram_alert_async(http_client, manual_digest_msg)
 
         if pending_alerts:
@@ -417,7 +417,7 @@ async def main():
 
         if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
             if digest_lines:
-                digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU (KRYPTO - 21:00)**\n───────────────────\n\n' + ''.join(digest_lines)
+                digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU KRYPTO - 21:00**\n───────────────────\n\n' + ''.join(digest_lines)
                 await send_telegram_alert_async(http_client, digest_msg)
                 cache['DIGEST_DATE'] = today_str
 
@@ -439,4 +439,3 @@ if __name__ == '__main__':
         
         asyncio.run(send_critical_error())
         raise e
-
