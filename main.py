@@ -283,11 +283,15 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         # Jeśli cena jest powyżej SMA 20, celem jest Górna Wstęga Bollingera
         tp_gbp = bb_upper_gbp if price_gbp >= sma20_gbp else sma20_gbp
 
-        # Obliczenie maksymalnej ceny wejścia dla granicy R:R >= 1.2
+        # Wyliczenie faktycznej maksymalnej ceny dla R:R >= 1.2
         min_rr = 1.2
         max_entry_gbp = (tp_gbp + min_rr * soft_sl_gbp) / (1 + min_rr)
-        if max_entry_gbp < price_gbp:
-            max_entry_gbp = price_gbp
+
+        # Status opłacalności wejścia "z rynku"
+        if price_gbp > max_entry_gbp:
+            entry_note = " ⚠️ *(Powyżej progu — poczekaj na pullback)*"
+        else:
+            entry_note = " 🟢 *(Cena w strefie opłacalnej)*"
 
         soft_sl_disp = f"£{soft_sl_gbp:,.2f}" if soft_sl_gbp >= 1.0 else f"£{soft_sl_gbp:,.4f}"
         hard_sl_disp = f"£{hard_sl_gbp:,.2f}" if hard_sl_gbp >= 1.0 else f"£{hard_sl_gbp:,.4f}"
@@ -360,7 +364,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 if is_pinbar:
                     confirmations.append(f"🕯️ **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
                 if bb_touched:
-                    confirmations.append("📉 **Knot przetestował dolną Wstęgi Bollingera (20, 2)**")
+                    confirmations.append("📉 **Knot przetestował dolną Wstęgę Bollingera (20, 2)**")
                 if stoch_turning_up:
                     confirmations.append(f"🔄 **Stochastic RSI wygina się w górę (%K: `{stoch_k}`)**")
                 confirmations.append(f"📊 **Wolumen:** {volume_str}")
@@ -377,7 +381,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                     f"📊 **RSI (4H):** `{rsi_4h}`\n\n"
                     f"⚙️ **PLAN TRANSAKCYJNY**\n"
                     f"├ 🛒 **Cena kupna:** `{price_disp}`\n"
-                    f"├ 🛑 **Maks. cena wejścia:** `{max_entry_disp}` *(próg R:R >= 1:1.2)*\n"
+                    f"├ 🛑 **Maks. cena wejścia:** `{max_entry_disp}`{entry_note}\n"
                     f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
                     f"├ 🛡️ **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
                     f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
