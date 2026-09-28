@@ -8,7 +8,7 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 
-import ccxt
+import ccxt.async_support as ccxt
 import gspread
 import httpx
 import pandas as pd
@@ -81,10 +81,10 @@ def save_cache(cache_data):
         for k, v in cache_data.items():
             if k.startswith("ALERT_"):
                 parts = k.split("_")
-                if len(parts) >= 3 and parts[-2].isdigit():
-                    ts = int(parts[-2])
-                    if now_ts - ts > retention_period:
-                        continue
+                # Precyzyjne wyszukiwanie znacznika czasu w kluczu
+                ts = next((int(p) for p in parts if p.isdigit() and len(p) >= 10), None)
+                if ts and (now_ts - ts > retention_period):
+                    continue
             cleaned_cache[k] = v
 
         dir_name = os.path.dirname(os.path.abspath(CACHE_FILE)) or "."
@@ -160,7 +160,7 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
 # --- 4. ANALIZA TECHNICZNA I DANE ---
 async def fetch_ohlcv_async(symbol, timeframe='4h', limit=250):
     try:
-        ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         return df
     except Exception as e:
@@ -169,7 +169,7 @@ async def fetch_ohlcv_async(symbol, timeframe='4h', limit=250):
 
 async def get_gbp_rate_async():
     try:
-        ticker = await asyncio.to_thread(exchange.fetch_ticker, 'USD/GBP')
+        ticker = await exchange.fetch_ticker('USD/GBP')
         return float(ticker['last'])
     except Exception:
         return 0.79
@@ -237,6 +237,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         price_native = float(last_row['close'])
         signal_low_native = float(last_row['low'])
         sma20_native = float(last_row['sma20'])
+        bb_upper_native = float(last_row['bb_upper'])
         
         rsi_4h = float(last_row['rsi'])
         prev_rsi_4h = float(prev_row['rsi'])
@@ -265,20 +266,23 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
 
         tv_clean_symbol = symbol.replace("/", "")
 
-        # Przepieczenie walutowe
+        # Przeliczenie walutowe
         fx_ratio = usd_to_gbp if 'USD' in symbol else 1.0
         symbol_display = symbol.replace('USD', 'GBP') if 'USD' in symbol else symbol
 
         price_gbp = price_native * fx_ratio
         low_gbp = signal_low_native * fx_ratio
         sma20_gbp = sma20_native * fx_ratio
+        bb_upper_gbp = bb_upper_native * fx_ratio
 
         price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
 
-        # --- DOKŁADNE POZIOMY TRANSAKCYJNE ---
+        # --- DYNAMICZNY PLAN TRANSAKCYJNY ---
         soft_sl_gbp = low_gbp * 0.998       # Unieważnienie (-0.2% pod dołkiem)
         hard_sl_gbp = low_gbp * 0.96        # Awaryjny SL (-4.0% na krach)
-        tp_gbp = sma20_gbp                  # Cel: Środkowa BB (SMA 20)
+        
+        # Jeśli cena jest powyżej SMA 20, celem jest Górna Wstęga Bollingera
+        tp_gbp = bb_upper_gbp if price_gbp >= sma20_gbp else sma20_gbp
 
         soft_sl_disp = f"£{soft_sl_gbp:,.2f}" if soft_sl_gbp >= 1.0 else f"£{soft_sl_gbp:,.4f}"
         hard_sl_disp = f"£{hard_sl_gbp:,.2f}" if hard_sl_gbp >= 1.0 else f"£{hard_sl_gbp:,.4f}"
@@ -290,7 +294,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
 
         rr_ratio = round(tp_pct / risk_pct, 2) if risk_pct > 0 else 0.0
 
-        # --- POPRAWIONA LOGIKA WARUNKÓW (BEZ PROGU RSI 45!) ---
+        # --- FILTROWANIE WARUNKÓW ---
         bb_touched = last_row['low'] <= last_row['bb_lower']
 
         current_signal_type = 'NONE'
@@ -350,12 +354,14 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 if is_pinbar:
                     confirmations.append(f"🕯️ **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
                 if bb_touched:
-                    confirmations.append("📉 **Knot przetestował dolną Wstęgę Bollingera (20, 2)**")
+                    confirmations.append("📉 **Knot przetestował dolną Wstęgi Bollingera (20, 2)**")
                 if stoch_turning_up:
                     confirmations.append(f"🔄 **Stochastic RSI wygina się w górę (%K: `{stoch_k}`)**")
                 confirmations.append(f"📊 **Wolumen:** {volume_str}")
 
                 conf_msg = "\n" + "\n".join(confirmations)
+
+                tp_target_name = "Górna BB 20" if price_gbp >= sma20_gbp else "Środkowa BB 20"
 
                 body = (
                     f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)**\n"
@@ -367,7 +373,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                     f"├ 🛒 **Cena kupna:** `{price_disp}`\n"
                     f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
                     f"├ 🛡️ **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
-                    f"├ 🎯 **Cel zysku (Środkowa BB 20):** `{tp_disp}` (`+{tp_pct}%`)\n"
+                    f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
                     f"└ ⚖️ **Stosunek R:R:** `1 : {rr_ratio}`\n\n"
                     f"📈 **Potwierdzenia rynkowe:**{conf_msg}\n\n"
                     f"👁 [Zobacz wykres na TradingView]({tv_link})"
@@ -399,88 +405,93 @@ async def main():
 
     sheet = init_google_sheet()
     cache = load_cache()
-    usd_to_gbp = await get_gbp_rate_async()
 
-    # --- KASKADOWY FILTR BITCOINA (BTC DUMP GUARD) ---
-    btc_dumping = False
     try:
-        btc_df = await fetch_ohlcv_async('BTC/GBP')
-        if btc_df is not None and len(btc_df) >= 200:
-            btc_df = calculate_indicators(btc_df)
-            btc_last = btc_df.iloc[-2]
-            btc_prev = btc_df.iloc[-3]
-            
-            btc_change = ((btc_last['close'] - btc_prev['close']) / btc_prev['close']) * 100
-            btc_rsi = float(btc_last['rsi'])
-            
-            # Jeśli BTC na zamkniętej świecy zjechał > 1.5% lub RSI < 36
-            if btc_change <= -1.5 or btc_rsi < 36.0:
-                btc_dumping = True
-                logging.warning(f"⚠️ BTC DUMP DETECTED (Zmiana: {btc_change:.2f}%, RSI: {btc_rsi}). Wstrzymano sygnały dla Altcoinów.")
-    except Exception as e:
-        logging.error(f"Błąd sprawdzania statusu BTC: {e}")
+        usd_to_gbp = await get_gbp_rate_async()
 
-    digest_lines = []
-    digest_summary_rows = []
-    pending_alerts = []
-    rows_to_append_sheets = []
-    success_count = 0
+        # --- KASKADOWY FILTR BITCOINA (BTC DUMP GUARD) ---
+        btc_dumping = False
+        try:
+            btc_df = await fetch_ohlcv_async('BTC/GBP')
+            if btc_df is not None and len(btc_df) >= 200:
+                btc_df = calculate_indicators(btc_df)
+                btc_last = btc_df.iloc[-2]
+                btc_prev = btc_df.iloc[-3]
+                
+                btc_change = ((btc_last['close'] - btc_prev['close']) / btc_prev['close']) * 100
+                btc_rsi = float(btc_last['rsi'])
+                
+                if btc_change <= -1.5 or btc_rsi < 36.0:
+                    btc_dumping = True
+                    logging.warning(f"⚠️ BTC DUMP DETECTED (Zmiana: {btc_change:.2f}%, RSI: {btc_rsi}). Wstrzymano sygnały dla Altcoinów.")
+        except Exception as e:
+            logging.error(f"Błąd sprawdzania statusu BTC: {e}")
 
-    async with httpx.AsyncClient() as http_client:
-        tasks = [process_symbol(symbol, usd_to_gbp, cache, btc_dumping=btc_dumping) for symbol in SYMBOLS]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        digest_lines = []
+        digest_summary_rows = []
+        pending_alerts = []
+        rows_to_append_sheets = []
+        success_count = 0
 
-        for res in results:
-            if isinstance(res, Exception) or res is None:
-                continue
+        async with httpx.AsyncClient() as http_client:
+            tasks = [process_symbol(symbol, usd_to_gbp, cache, btc_dumping=btc_dumping) for symbol in SYMBOLS]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            success_count += 1
-            digest_lines.append(res['digest_line'])
-            digest_summary_rows.append(res['digest_summary_row'])
+            for res in results:
+                if isinstance(res, Exception) or res is None:
+                    continue
 
-            if res['pending_alert'] and res['candle_key']:
-                pending_alerts.append(res['pending_alert'])
-                cache[res['candle_key']] = True
+                success_count += 1
+                digest_lines.append(res['digest_line'])
+                digest_summary_rows.append(res['digest_summary_row'])
 
-        elapsed = round(time.time() - start_time, 2)
-        health_summary = f"🩺 **Autodiagnostyka Krypto:** Przeanalizowano `{success_count}/{len(SYMBOLS)}` monet w `{elapsed}s`."
-        logging.info(health_summary.replace('**', '').replace('`', ''))
+                if res['pending_alert'] and res['candle_key']:
+                    pending_alerts.append(res['pending_alert'])
+                    cache[res['candle_key']] = True
 
-        write_github_step_summary(digest_summary_rows, health_msg=health_summary)
-        await process_telegram_commands_async(http_client, cache, digest_summary_rows)
+            elapsed = round(time.time() - start_time, 2)
+            health_summary = f"🩺 **Autodiagnostyka Krypto:** Przeanalizowano `{success_count}/{len(SYMBOLS)}` monet w `{elapsed}s`."
+            logging.info(health_summary.replace('**', '').replace('`', ''))
 
-        if github_event == 'workflow_dispatch' and digest_lines:
-            manual_digest_msg = '🎯 **RĘCZNY SKAN RYNKU KRYPTO**\n───────────────────\n\n' + ''.join(digest_lines)
-            await send_telegram_alert_async(http_client, manual_digest_msg)
+            write_github_step_summary(digest_summary_rows, health_msg=health_summary)
+            await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
-        if pending_alerts:
-            for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
-                await send_telegram_alert_async(http_client, msg)
-                await asyncio.sleep(0.3)
-                rows_to_append_sheets.append([
-                    now_str,
-                    sym_disp,
-                    status_txt,
-                    price_disp,
-                    f"RSI: {rsi_val}"
-                ])
+            if github_event == 'workflow_dispatch' and digest_lines:
+                manual_digest_msg = '🎯 **RĘCZNY SKAN RYNKU KRYPTO**\n───────────────────\n\n' + ''.join(digest_lines)
+                await send_telegram_alert_async(http_client, manual_digest_msg)
 
-        if sheet and rows_to_append_sheets:
-            try:
-                await asyncio.to_thread(sheet.append_rows, rows_to_append_sheets)
-                logging.info(f"Zapisano {len(rows_to_append_sheets)} wierszy krypto w Google Sheets.")
-            except Exception as e:
-                logging.error(f"Nie udało się zapisać wierszy w Google Sheets: {e}")
+            if pending_alerts:
+                for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
+                    await send_telegram_alert_async(http_client, msg)
+                    await asyncio.sleep(0.3)
+                    rows_to_append_sheets.append([
+                        now_str,
+                        sym_disp,
+                        status_txt,
+                        price_disp,
+                        f"RSI: {rsi_val}"
+                    ])
 
-        if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
-            if digest_lines:
-                digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU KRYPTO - 21:00**\n───────────────────\n\n' + ''.join(digest_lines)
-                await send_telegram_alert_async(http_client, digest_msg)
-                cache['DIGEST_DATE'] = today_str
+            if sheet and rows_to_append_sheets:
+                try:
+                    await asyncio.to_thread(sheet.append_rows, rows_to_append_sheets)
+                    logging.info(f"Zapisano {len(rows_to_append_sheets)} wierszy krypto w Google Sheets.")
+                except Exception as e:
+                    logging.error(f"Nie udało się zapisać wierszy w Google Sheets: {e}")
 
-        save_cache(cache)
+            if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
+                if digest_lines:
+                    digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU KRYPTO - 21:00**\n───────────────────\n\n' + ''.join(digest_lines)
+                    await send_telegram_alert_async(http_client, digest_msg)
+                    cache['DIGEST_DATE'] = today_str
 
-    logging.info(f"Skaner krypto zakończył działanie w czasie: {elapsed}s.")
+            save_cache(cache)
+
+        logging.info(f"Skaner krypto zakończył działanie w czasie: {elapsed}s.")
+
+    finally:
+        # Zamykanie otwartych połączeń HTTP giełdy
+        await exchange.close()
 
 
 if __name__ == '__main__':
