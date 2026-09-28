@@ -81,7 +81,6 @@ def save_cache(cache_data):
         for k, v in cache_data.items():
             if k.startswith("ALERT_"):
                 parts = k.split("_")
-                # Precyzyjne wyszukiwanie znacznika czasu w kluczu
                 ts = next((int(p) for p in parts if p.isdigit() and len(p) >= 10), None)
                 if ts and (now_ts - ts > retention_period):
                     continue
@@ -284,9 +283,16 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         # Jeśli cena jest powyżej SMA 20, celem jest Górna Wstęga Bollingera
         tp_gbp = bb_upper_gbp if price_gbp >= sma20_gbp else sma20_gbp
 
+        # Obliczenie maksymalnej ceny wejścia dla granicy R:R >= 1.2
+        min_rr = 1.2
+        max_entry_gbp = (tp_gbp + min_rr * soft_sl_gbp) / (1 + min_rr)
+        if max_entry_gbp < price_gbp:
+            max_entry_gbp = price_gbp
+
         soft_sl_disp = f"£{soft_sl_gbp:,.2f}" if soft_sl_gbp >= 1.0 else f"£{soft_sl_gbp:,.4f}"
         hard_sl_disp = f"£{hard_sl_gbp:,.2f}" if hard_sl_gbp >= 1.0 else f"£{hard_sl_gbp:,.4f}"
         tp_disp = f"£{tp_gbp:,.2f}" if tp_gbp >= 1.0 else f"£{tp_gbp:,.4f}"
+        max_entry_disp = f"£{max_entry_gbp:,.2f}" if max_entry_gbp >= 1.0 else f"£{max_entry_gbp:,.4f}"
 
         risk_pct = round(((price_gbp - soft_sl_gbp) / price_gbp) * 100, 2)
         hard_risk_pct = round(((price_gbp - hard_sl_gbp) / price_gbp) * 100, 2)
@@ -371,6 +377,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                     f"📊 **RSI (4H):** `{rsi_4h}`\n\n"
                     f"⚙️ **PLAN TRANSAKCYJNY**\n"
                     f"├ 🛒 **Cena kupna:** `{price_disp}`\n"
+                    f"├ 🛑 **Maks. cena wejścia:** `{max_entry_disp}` *(próg R:R >= 1:1.2)*\n"
                     f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
                     f"├ 🛡️ **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
                     f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
@@ -396,7 +403,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
 # --- 5. GŁÓWNA PĘTLA APLIKACJI ---
 async def main():
     start_time = time.time()
-    logging.info("Uruchamianie Skanera Krypto V2.1...")
+    logging.info("Uruchamianie Skanera Krypto V2.2...")
 
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
@@ -490,7 +497,6 @@ async def main():
         logging.info(f"Skaner krypto zakończył działanie w czasie: {elapsed}s.")
 
     finally:
-        # Zamykanie otwartych połączeń HTTP giełdy
         await exchange.close()
 
 
