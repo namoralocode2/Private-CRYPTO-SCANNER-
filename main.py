@@ -185,7 +185,6 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     rs = avg_gain / avg_loss
     df['rsi'] = round(100 - (100 / (1 + rs)), 2)
     
-    # --- STOCHASTIC RSI (14, 14, 3, 3) ---
     stoch_period = 14
     rsi_min = df['rsi'].rolling(window=stoch_period).min()
     rsi_max = df['rsi'].rolling(window=stoch_period).max()
@@ -216,15 +215,15 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     return df
 
 
-async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
-    """Pobiera i analizuje dane dla pojedynczej monety (wykonywane równolegle)."""
+async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumping: bool = False):
+    """Pobiera i analizuje dane dla pojedynczej monety."""
     try:
         is_core = symbol in CORE_CRYPTO
         crypto_icon = '🏛️' if is_core else '🚀'
         
         pinbar_threshold = 0.50 if is_core else 0.60
         rsi_signal_threshold = 35.0 if is_core else 33.0
-        max_pinbar_rsi = 42.0 if is_core else 38.0
+        max_pinbar_rsi = 40.0 if is_core else 36.0
         
         df = await fetch_ohlcv_async(symbol)
         if df is None or len(df) < 205:
@@ -236,6 +235,9 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
         prev_row = df.iloc[-3]
 
         price_native = float(last_row['close'])
+        signal_low_native = float(last_row['low'])
+        sma20_native = float(last_row['sma20'])
+        
         rsi_4h = float(last_row['rsi'])
         prev_rsi_4h = float(prev_row['rsi'])
 
@@ -263,24 +265,42 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
 
         tv_clean_symbol = symbol.replace("/", "")
 
-        if 'USD' in symbol:
-            price_gbp = price_native * usd_to_gbp
-            symbol_display = symbol.replace('USD', 'GBP')
-        else:
-            price_gbp = price_native
-            symbol_display = symbol
+        # Przepieczenie walutowe
+        fx_ratio = usd_to_gbp if 'USD' in symbol else 1.0
+        symbol_display = symbol.replace('USD', 'GBP') if 'USD' in symbol else symbol
+
+        price_gbp = price_native * fx_ratio
+        low_gbp = signal_low_native * fx_ratio
+        sma20_gbp = sma20_native * fx_ratio
 
         price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
 
-        # --- LOGIKA WARUNKÓW ---
+        # --- DOKŁADNE POZIOMY TRANSAKCYJNE ---
+        soft_sl_gbp = low_gbp * 0.998       # Unieważnienie (-0.2% pod dołkiem)
+        hard_sl_gbp = low_gbp * 0.96        # Awaryjny SL (-4.0% na krach)
+        tp_gbp = sma20_gbp                  # Cel: Środkowa BB (SMA 20)
+
+        soft_sl_disp = f"£{soft_sl_gbp:,.2f}" if soft_sl_gbp >= 1.0 else f"£{soft_sl_gbp:,.4f}"
+        hard_sl_disp = f"£{hard_sl_gbp:,.2f}" if hard_sl_gbp >= 1.0 else f"£{hard_sl_gbp:,.4f}"
+        tp_disp = f"£{tp_gbp:,.2f}" if tp_gbp >= 1.0 else f"£{tp_gbp:,.4f}"
+
+        risk_pct = round(((price_gbp - soft_sl_gbp) / price_gbp) * 100, 2)
+        hard_risk_pct = round(((price_gbp - hard_sl_gbp) / price_gbp) * 100, 2)
+        tp_pct = round(((tp_gbp - price_gbp) / price_gbp) * 100, 2)
+
+        rr_ratio = round(tp_pct / risk_pct, 2) if risk_pct > 0 else 0.0
+
+        # --- POPRAWIONA LOGIKA WARUNKÓW (BEZ PROGU RSI 45!) ---
         bb_touched = last_row['low'] <= last_row['bb_lower']
-        max_rsi_for_bb = 45.0
 
         current_signal_type = 'NONE'
-        if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= max_rsi_for_bb):
-            current_signal_type = 'BUY_REBOUND'
-        elif is_pinbar and rsi_4h <= max_pinbar_rsi:
-            current_signal_type = 'BUY_PINBAR'
+        
+        # Jeśli BTC spływa, altcoiny nie generują nowych alertów kupna
+        if not (btc_dumping and not is_core):
+            if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= rsi_signal_threshold):
+                current_signal_type = 'BUY_REBOUND'
+            elif is_pinbar and rsi_4h <= max_pinbar_rsi:
+                current_signal_type = 'BUY_PINBAR'
 
         status_map = {
             'NONE': '⚪ Neutralny',
@@ -314,7 +334,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
             is_new_signal = False
             if current_signal_type == 'BUY_REBOUND':
                 prev_bb_touched = prev_row['low'] <= prev_row['bb_lower']
-                prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_bb_touched and prev_rsi_4h <= max_rsi_for_bb)
+                prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_bb_touched and prev_rsi_4h <= rsi_signal_threshold)
                 is_new_signal = not prev_was_rebound
             elif current_signal_type == 'BUY_PINBAR':
                 prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
@@ -328,23 +348,29 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
                 confirmations = []
                 confirmations.append(f"📈 **Trend główny:** {sma200_txt}")
                 if is_pinbar:
-                    confirmations.append(f"🕯️ **Knot popytowy na świecy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
+                    confirmations.append(f"🕯️ **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
                 if bb_touched:
-                    confirmations.append("📉 **Knot świecy przetestował dolną Wstęgę Bollingera (20, 2)**")
+                    confirmations.append("📉 **Knot przetestował dolną Wstęgę Bollingera (20, 2)**")
                 if stoch_turning_up:
-                    confirmations.append(f"🔄 **Stochastic RSI wygina się w górę z wyprzedania (%K: `{stoch_k}`)**")
+                    confirmations.append(f"🔄 **Stochastic RSI wygina się w górę (%K: `{stoch_k}`)**")
                 confirmations.append(f"📊 **Wolumen:** {volume_str}")
 
                 conf_msg = "\n" + "\n".join(confirmations)
 
                 body = (
-                    f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING)**\n"
+                    f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)**\n"
                     f"───────────────────\n"
                     f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
-                    f"💰 **Cena:** `{price_disp}`\n"
-                    f"📊 **RSI (4H):** `{rsi_4h}`{conf_msg}\n\n"
-                    f"👁 **Oceń wykres i dołek knota:**\n"
-                    f"📈 [Zobacz wykres na TradingView]({tv_link})"
+                    f"💰 **Cena wejścia (Close):** `{price_disp}`\n"
+                    f"📊 **RSI (4H):** `{rsi_4h}`\n\n"
+                    f"⚙️ **PLAN TRANSAKCYJNY**\n"
+                    f"├ 🛒 **Cena kupna:** `{price_disp}`\n"
+                    f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
+                    f"├ 🛡️ **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
+                    f"├ 🎯 **Cel zysku (Środkowa BB 20):** `{tp_disp}` (`+{tp_pct}%`)\n"
+                    f"└ ⚖️ **Stosunek R:R:** `1 : {rr_ratio}`\n\n"
+                    f"📈 **Potwierdzenia rynkowe:**{conf_msg}\n\n"
+                    f"👁 [Zobacz wykres na TradingView]({tv_link})"
                 )
 
                 pending_alert = (body, symbol_display, status_txt, price_disp, rsi_4h)
@@ -364,7 +390,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict):
 # --- 5. GŁÓWNA PĘTLA APLIKACJI ---
 async def main():
     start_time = time.time()
-    logging.info("Uruchamianie Skanera Krypto (Tryb Równoległy V2)...")
+    logging.info("Uruchamianie Skanera Krypto V2.1...")
 
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
@@ -375,6 +401,25 @@ async def main():
     cache = load_cache()
     usd_to_gbp = await get_gbp_rate_async()
 
+    # --- KASKADOWY FILTR BITCOINA (BTC DUMP GUARD) ---
+    btc_dumping = False
+    try:
+        btc_df = await fetch_ohlcv_async('BTC/GBP')
+        if btc_df is not None and len(btc_df) >= 200:
+            btc_df = calculate_indicators(btc_df)
+            btc_last = btc_df.iloc[-2]
+            btc_prev = btc_df.iloc[-3]
+            
+            btc_change = ((btc_last['close'] - btc_prev['close']) / btc_prev['close']) * 100
+            btc_rsi = float(btc_last['rsi'])
+            
+            # Jeśli BTC na zamkniętej świecy zjechał > 1.5% lub RSI < 36
+            if btc_change <= -1.5 or btc_rsi < 36.0:
+                btc_dumping = True
+                logging.warning(f"⚠️ BTC DUMP DETECTED (Zmiana: {btc_change:.2f}%, RSI: {btc_rsi}). Wstrzymano sygnały dla Altcoinów.")
+    except Exception as e:
+        logging.error(f"Błąd sprawdzania statusu BTC: {e}")
+
     digest_lines = []
     digest_summary_rows = []
     pending_alerts = []
@@ -382,8 +427,7 @@ async def main():
     success_count = 0
 
     async with httpx.AsyncClient() as http_client:
-        # --- RÓWNOLEGŁE POBIERANIE I ANALIZA SYMBOLI ---
-        tasks = [process_symbol(symbol, usd_to_gbp, cache) for symbol in SYMBOLS]
+        tasks = [process_symbol(symbol, usd_to_gbp, cache, btc_dumping=btc_dumping) for symbol in SYMBOLS]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for res in results:
@@ -405,7 +449,6 @@ async def main():
         write_github_step_summary(digest_summary_rows, health_msg=health_summary)
         await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
-        # --- OBSŁUGA RĘCZNEGO URUCHOMIENIA WORKFLOW ---
         if github_event == 'workflow_dispatch' and digest_lines:
             manual_digest_msg = '🎯 **RĘCZNY SKAN RYNKU KRYPTO**\n───────────────────\n\n' + ''.join(digest_lines)
             await send_telegram_alert_async(http_client, manual_digest_msg)
