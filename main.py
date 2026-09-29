@@ -315,11 +315,14 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 current_signal_type = 'BUY_REBOUND'
             elif is_pinbar and rsi_4h <= max_pinbar_rsi:
                 current_signal_type = 'BUY_PINBAR'
+            elif bb_touched and rsi_4h <= 50.0:
+                current_signal_type = 'BUY_BOUNCE'
 
         status_map = {
             'NONE': '⚪ Neutralny',
             'BUY_REBOUND': '⚡️ SZYBKIE ODBICIE',
-            'BUY_PINBAR': '🕯️ PINBAR ODBICIE'
+            'BUY_PINBAR': '🕯️ PINBAR ODBICIE',
+            'BUY_BOUNCE': '🟡 STREFA ODBICIA'
         }
         status_txt = status_map.get(current_signal_type, '⚪ Neutralny')
         pinbar_txt = f"{int(pinbar_threshold * 100)}%" if is_pinbar else "Brak"
@@ -353,6 +356,10 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
             elif current_signal_type == 'BUY_PINBAR':
                 prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
                 is_new_signal = not prev_was_pinbar
+            elif current_signal_type == 'BUY_BOUNCE':
+                prev_bb_touched = prev_row['low'] <= prev_row['bb_lower']
+                prev_was_bounce = prev_bb_touched and (prev_rsi_4h <= 50.0)
+                is_new_signal = not prev_was_bounce
 
             should_alert = not already_alerted and is_new_signal
 
@@ -372,9 +379,10 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 conf_msg = "\n" + "\n".join(confirmations)
 
                 tp_target_name = "Górna BB 20" if price_gbp >= sma20_gbp else "Środkowa BB 20"
+                alert_header = "🟡 **STREFA ODBICIA (BOUNCE ZONE 4H)**" if current_signal_type == 'BUY_BOUNCE' else "⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)**"
 
                 body = (
-                    f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)**\n"
+                    f"{alert_header}\n"
                     f"───────────────────\n"
                     f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
                     f"💰 **Cena wejścia (Close):** `{price_disp}`\n"
@@ -383,7 +391,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                     f"├ 🛒 **Cena kupna:** `{price_disp}`\n"
                     f"├ 🛑 **Maks. cena wejścia:** `{max_entry_disp}`{entry_note}\n"
                     f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
-                    f"├ 🛡️ **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
+                    f"├ 🛡️️ **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
                     f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
                     f"└ ⚖️ **Stosunek R:R:** `1 : {rr_ratio}`\n\n"
                     f"📈 **Potwierdzenia rynkowe:**{conf_msg}\n\n"
