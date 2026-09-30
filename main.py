@@ -4,6 +4,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from zoneinfo import ZoneInfo
@@ -55,14 +56,13 @@ def init_google_sheet():
         logging.error("Brak GOOGLE_CREDENTIALS lub SPREADSHEET_ID w środowisku!")
         return None
     try:
-        # 1. Usuwanie spacji, enterów i znaków nowej linii z sekretu
-        raw_id = SPREADSHEET_ID.strip().replace('\n', '').replace('\r', '').replace(' ', '')
-        
-        # 2. Wyciąganie czystego ID z pełnego linku URL (jeśli wklejono cały adres)
+        raw_id = SPREADSHEET_ID
         if "/d/" in raw_id:
-            clean_sheet_id = raw_id.split("/d/")[1].split("/")[0]
-        else:
-            clean_sheet_id = raw_id
+            raw_id = raw_id.split("/d/")[1].split("/")[0]
+            
+        # Filtrowanie regex - zostawia TYLKO prawidłowe znaki ID (literki, cyfry, myślniki i _),
+        # bezlitośnie wycinając \u200b, spacje, entery i ukryte znaki z telefonu.
+        clean_sheet_id = re.sub(r'[^a-zA-Z0-9-_]', '', raw_id)
             
         logging.info(f"Oczyszczone ID arkusza (Krypto): {repr(clean_sheet_id)} (długość: {len(clean_sheet_id)})")
         
@@ -390,7 +390,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 confirmations = []
                 confirmations.append(f"📈 **Trend główny:** {sma200_txt}")
                 if is_pinbar:
-                    confirmations.append(f"🕯️️ **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
+                    confirmations.append(f"🕯 **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
                 if bb_touched:
                     confirmations.append("📉 **Knot przetestował dolną Wstęgi Bollingera (20, 2)**")
                 if stoch_turning_up:
