@@ -280,14 +280,11 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         soft_sl_gbp = low_gbp * 0.998       # Unieważnienie (-0.2% pod dołkiem)
         hard_sl_gbp = low_gbp * 0.96        # Awaryjny SL (-4.0% na krach)
         
-        # Jeśli cena jest powyżej SMA 20, celem jest Górna Wstęga Bollingera
         tp_gbp = bb_upper_gbp if price_gbp >= sma20_gbp else sma20_gbp
 
-        # Wyliczenie faktycznej maksymalnej ceny dla R:R >= 1.2
         min_rr = 1.2
         max_entry_gbp = (tp_gbp + min_rr * soft_sl_gbp) / (1 + min_rr)
 
-        # Status opłacalności wejścia "z rynku"
         if price_gbp > max_entry_gbp:
             entry_note = " ⚠️ *(Powyżej progu — poczekaj na pullback)*"
         else:
@@ -307,19 +304,26 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         # --- FILTROWANIE WARUNKÓW ---
         bb_touched = last_row['low'] <= last_row['bb_lower']
 
-        current_signal_type = 'NONE'
-        
-        # Jeśli BTC spływa, altcoiny nie generują nowych alertów kupna
-        if not (btc_dumping and not is_core):
-            if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= rsi_signal_threshold):
-                current_signal_type = 'BUY_REBOUND'
-            elif is_pinbar and rsi_4h <= max_pinbar_rsi:
-                current_signal_type = 'BUY_PINBAR'
-            elif bb_touched and rsi_4h <= 50.0:
-                current_signal_type = 'BUY_BOUNCE'
+        raw_signal = 'NONE'
+        if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= rsi_signal_threshold):
+            raw_signal = 'BUY_REBOUND'
+        elif is_pinbar and rsi_4h <= max_pinbar_rsi:
+            raw_signal = 'BUY_PINBAR'
+        elif bb_touched and rsi_4h <= 50.0:
+            raw_signal = 'BUY_BOUNCE'
+
+        blocked_by_guard = False
+        if raw_signal != 'NONE':
+            if btc_dumping and not is_core:
+                blocked_by_guard = True
+                current_signal_type = 'NONE'
+            else:
+                current_signal_type = raw_signal
+        else:
+            current_signal_type = 'NONE'
 
         status_map = {
-            'NONE': '⚪ Neutralny',
+            'NONE': '🛡️️ Ochrona BTC (Spadek BTC)' if blocked_by_guard else '⚪ Neutralny',
             'BUY_REBOUND': '⚡️ SZYBKIE ODBICIE',
             'BUY_PINBAR': '🕯️ PINBAR ODBICIE',
             'BUY_BOUNCE': '🟡 STREFA ODBICIA'
@@ -391,7 +395,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                     f"├ 🛒 **Cena kupna:** `{price_disp}`\n"
                     f"├ 🛑 **Maks. cena wejścia:** `{max_entry_disp}`{entry_note}\n"
                     f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
-                    f"├ 🛡️️ **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
+                    f"├ 🛡 **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
                     f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
                     f"└ ⚖️ **Stosunek R:R:** `1 : {rr_ratio}`\n\n"
                     f"📈 **Potwierdzenia rynkowe:**{conf_msg}\n\n"
