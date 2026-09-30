@@ -52,15 +52,32 @@ exchange = ccxt.kraken({
 # --- 3. INICJALIZACJA USŁUG I I/O ---
 def init_google_sheet():
     if not GOOGLE_CREDENTIALS or not SPREADSHEET_ID:
+        logging.error("Brak GOOGLE_CREDENTIALS lub SPREADSHEET_ID w środowisku!")
         return None
     try:
+        # 1. Usuwanie spacji, enterów i znaków nowej linii z sekretu
+        raw_id = SPREADSHEET_ID.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+        
+        # 2. Wyciąganie czystego ID z pełnego linku URL (jeśli wklejono cały adres)
+        if "/d/" in raw_id:
+            clean_sheet_id = raw_id.split("/d/")[1].split("/")[0]
+        else:
+            clean_sheet_id = raw_id
+            
+        logging.info(f"Oczyszczone ID arkusza (Krypto): {repr(clean_sheet_id)} (długość: {len(clean_sheet_id)})")
+        
         creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         sheet_client = gspread.authorize(creds)
-        return sheet_client.open_by_key(SPREADSHEET_ID).sheet1
+        sheet = sheet_client.open_by_key(clean_sheet_id).sheet1
+        logging.info("Pomyślnie połączono z Google Sheets dla Krypto!")
+        return sheet
     except Exception as e:
-        logging.error(f"Błąd inicjalizacji Google Sheets: {e}")
+        logging.error(f"Błąd inicjalizacji Google Sheets w skanerze Krypto: {e}")
         return None
 
 def load_cache():
@@ -323,7 +340,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
             current_signal_type = 'NONE'
 
         status_map = {
-            'NONE': '🛡️️ Ochrona BTC (Spadek BTC)' if blocked_by_guard else '⚪ Neutralny',
+            'NONE': '🛡 Ochrona BTC (Spadek BTC)' if blocked_by_guard else '⚪ Neutralny',
             'BUY_REBOUND': '⚡️ SZYBKIE ODBICIE',
             'BUY_PINBAR': '🕯️ PINBAR ODBICIE',
             'BUY_BOUNCE': '🟡 STREFA ODBICIA'
@@ -373,9 +390,9 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 confirmations = []
                 confirmations.append(f"📈 **Trend główny:** {sma200_txt}")
                 if is_pinbar:
-                    confirmations.append(f"🕯️ **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
+                    confirmations.append(f"🕯️️ **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
                 if bb_touched:
-                    confirmations.append("📉 **Knot przetestował dolną Wstęgę Bollingera (20, 2)**")
+                    confirmations.append("📉 **Knot przetestował dolną Wstęgi Bollingera (20, 2)**")
                 if stoch_turning_up:
                     confirmations.append(f"🔄 **Stochastic RSI wygina się w górę (%K: `{stoch_k}`)**")
                 confirmations.append(f"📊 **Wolumen:** {volume_str}")
