@@ -297,18 +297,9 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         
         tp_gbp = bb_upper_gbp if price_gbp >= sma20_gbp else sma20_gbp
 
-        min_rr = 1.2
-        max_entry_gbp = (tp_gbp + min_rr * soft_sl_gbp) / (1 + min_rr)
-
-        if price_gbp > max_entry_gbp:
-            entry_note = " ⚠️ *(Powyżej progu — poczekaj na pullback)*"
-        else:
-            entry_note = " 🟢 *(Cena w strefie opłacalnej)*"
-
         soft_sl_disp = f"£{soft_sl_gbp:,.2f}" if soft_sl_gbp >= 1.0 else f"£{soft_sl_gbp:,.4f}"
         hard_sl_disp = f"£{hard_sl_gbp:,.2f}" if hard_sl_gbp >= 1.0 else f"£{hard_sl_gbp:,.4f}"
         tp_disp = f"£{tp_gbp:,.2f}" if tp_gbp >= 1.0 else f"£{tp_gbp:,.4f}"
-        max_entry_disp = f"£{max_entry_gbp:,.2f}" if max_entry_gbp >= 1.0 else f"£{max_entry_gbp:,.4f}"
 
         risk_pct = round(((price_gbp - soft_sl_gbp) / price_gbp) * 100, 2)
         hard_risk_pct = round(((price_gbp - hard_sl_gbp) / price_gbp) * 100, 2)
@@ -399,17 +390,26 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 conf_msg = "\n" + "\n".join(confirmations)
 
                 tp_target_name = "Górna BB 20" if price_gbp >= sma20_gbp else "Środkowa BB 20"
-                alert_header = "🟡 **STREFA ODBICIA (BOUNCE ZONE 4H)**" if current_signal_type == 'BUY_BOUNCE' else "⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)**"
+
+                if rr_ratio >= 1.3:
+                    status_emoji = "🟢"
+                    entry_line = f"├ 🟢 **Kupuj (Market):** `{price_disp}`"
+                else:
+                    status_emoji = "🟡"
+                    limit_price_gbp = (price_gbp + low_gbp) / 2
+                    limit_price_disp = f"£{limit_price_gbp:,.2f}" if limit_price_gbp >= 1.0 else f"£{limit_price_gbp:,.4f}"
+                    entry_line = f"├ 🟡 **Ustaw Limit (50% knota):** `{limit_price_disp}`"
+
+                alert_header = f"🟡 **STREFA ODBICIA (BOUNCE ZONE 4H)** {status_emoji}" if current_signal_type == 'BUY_BOUNCE' else f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)** {status_emoji}"
 
                 body = (
                     f"{alert_header}\n"
                     f"───────────────────\n"
                     f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
-                    f"💰 **Cena wejścia (Close):** `{price_disp}`\n"
+                    f"💰 **Cena rynkowa:** `{price_disp}`\n"
                     f"📊 **RSI (4H):** `{rsi_4h}`\n\n"
                     f"⚙️ **PLAN TRANSAKCYJNY**\n"
-                    f"├ 🛒 **Cena kupna:** `{price_disp}`\n"
-                    f"├ 🛑 **Maks. cena wejścia:** `{max_entry_disp}`{entry_note}\n"
+                    f"{entry_line}\n"
                     f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
                     f"├ 🛡 **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
                     f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
