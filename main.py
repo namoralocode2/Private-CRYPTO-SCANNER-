@@ -71,8 +71,8 @@ def init_google_sheet():
         ]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         sheet_client = gspread.authorize(creds)
-        sheet = sheet_client.open_by_key(clean_sheet_id).sheet1
-        logging.info("Pomyślnie połączono z Google Sheets dla Krypto!")
+        sheet = sheet_client.open_by_key(clean_sheet_id).worksheet("Krypto")
+        logging.info("Pomyślnie połączono z Google Sheets dla Krypto (zakładka Krypto)!")
         return sheet
     except Exception as e:
         logging.error(f"Błąd inicjalizacji Google Sheets w skanerze Krypto: {e}")
