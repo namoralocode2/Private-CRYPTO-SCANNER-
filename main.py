@@ -33,7 +33,7 @@ ALT_CRYPTO = [
     'SOL/GBP', 'TAO/USD', 'RENDER/USD', 
     'ONDO/USD', 'XRP/GBP', 'LINK/GBP', 
     'SUI/GBP', 'AAVE/GBP', 'FET/USD', 
-    'NEAR/USD'
+    'NEAR/USD', 'HNT/USD', 'ARB/USD'
 ]
 
 env_crypto = os.getenv('CRYPTO_PAIRS')
