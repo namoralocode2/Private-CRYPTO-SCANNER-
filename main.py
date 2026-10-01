@@ -60,8 +60,6 @@ def init_google_sheet():
         if "/d/" in raw_id:
             raw_id = raw_id.split("/d/")[1].split("/")[0]
             
-        # Filtrowanie regex - zostawia TYLKO prawidłowe znaki ID (literki, cyfry, myślniki i _),
-        # bezlitośnie wycinając \u200b, spacje, entery i ukryte znaki z telefonu.
         clean_sheet_id = re.sub(r'[^a-zA-Z0-9-_]', '', raw_id)
             
         logging.info(f"Oczyszczone ID arkusza (Krypto): {repr(clean_sheet_id)} (długość: {len(clean_sheet_id)})")
@@ -382,7 +380,8 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 prev_was_bounce = prev_bb_touched and (prev_rsi_4h <= 50.0)
                 is_new_signal = not prev_was_bounce
 
-            should_alert = not already_alerted and is_new_signal
+            # WYSYŁA ALERT TYLKO GDY R:R >= 1.0
+            should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.0)
 
             if should_alert:
                 tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
@@ -546,4 +545,3 @@ if __name__ == '__main__':
         
         asyncio.run(send_critical_error())
         raise e
-
