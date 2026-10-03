@@ -233,7 +233,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
     """Pobiera i analizuje dane dla pojedynczej monety."""
     try:
         is_core = symbol in CORE_CRYPTO
-        crypto_icon = '🏛️' if is_core else '🚀'
+        crypto_icon = '🏛️️' if is_core else '🚀'
         
         pinbar_threshold = 0.50 if is_core else 0.60
         rsi_signal_threshold = 35.0 if is_core else 33.0
@@ -274,6 +274,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         vol_target = last_row['volume']
         vol_sma = last_row['vol_sma20']
         volume_str = "Standardowy"
+        vol_ratio = 100
         if pd.notna(vol_sma) and vol_sma > 0:
             vol_ratio = int((vol_target / vol_sma) * 100)
             volume_str = f"{vol_ratio}% średniej {'🟢 (Wysoki)' if vol_ratio >= 120 else ('🔴 (Niski)' if vol_ratio <= 80 else '🟡 (Standard)')}"
@@ -371,8 +372,8 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 prev_was_bounce = prev_bb_touched and (prev_rsi_4h <= 50.0)
                 is_new_signal = not prev_was_bounce
 
-            # WYSYŁA ALERT TYLKO GDY R:R >= 1.0
-            should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.0)
+            # WYSYŁA ALERT TYLKO GDY R:R >= 1.0 ORAZ WOLUMEN >= 100% ŚREDNIEJ
+            should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.0) and (vol_ratio >= 100)
 
             if should_alert:
                 tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
