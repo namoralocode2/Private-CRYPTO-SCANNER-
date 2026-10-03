@@ -233,7 +233,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
     """Pobiera i analizuje dane dla pojedynczej monety."""
     try:
         is_core = symbol in CORE_CRYPTO
-        crypto_icon = '🏛️️' if is_core else '🚀'
+        crypto_icon = '🏛' if is_core else '🚀'
         
         pinbar_threshold = 0.50 if is_core else 0.60
         rsi_signal_threshold = 35.0 if is_core else 33.0
@@ -308,16 +308,17 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
 
         rr_ratio = round(tp_pct / risk_pct, 2) if risk_pct > 0 else 0.0
 
-        # --- FILTROWANIE WARUNKÓW ---
+        # --- FILTROWANIE WARUNKÓW (Z TWARDYM FILTREM WOLUMENU 110%) ---
         bb_touched = last_row['low'] <= last_row['bb_lower']
 
         raw_signal = 'NONE'
-        if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= rsi_signal_threshold):
-            raw_signal = 'BUY_REBOUND'
-        elif is_pinbar and rsi_4h <= max_pinbar_rsi:
-            raw_signal = 'BUY_PINBAR'
-        elif bb_touched and rsi_4h <= 50.0:
-            raw_signal = 'BUY_BOUNCE'
+        if vol_ratio >= 110:
+            if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= rsi_signal_threshold):
+                raw_signal = 'BUY_REBOUND'
+            elif is_pinbar and rsi_4h <= max_pinbar_rsi:
+                raw_signal = 'BUY_PINBAR'
+            elif bb_touched and rsi_4h <= 50.0:
+                raw_signal = 'BUY_BOUNCE'
 
         blocked_by_guard = False
         if raw_signal != 'NONE':
@@ -372,8 +373,8 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                 prev_was_bounce = prev_bb_touched and (prev_rsi_4h <= 50.0)
                 is_new_signal = not prev_was_bounce
 
-            # WYSYŁA ALERT TYLKO GDY R:R >= 1.0 ORAZ WOLUMEN >= 100% ŚREDNIEJ
-            should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.0) and (vol_ratio >= 100)
+            # WYSYŁA ALERT TYLKO GDY R:R >= 1.0
+            should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.0)
 
             if should_alert:
                 tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
