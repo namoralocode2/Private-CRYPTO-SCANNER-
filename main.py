@@ -44,11 +44,6 @@ else:
 
 CACHE_FILE = 'cache_krypto.json'
 
-exchange = ccxt.kraken({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'spot'}
-})
-
 
 # --- 3. INICJALIZACJA USŁUG I I/O ---
 def init_google_sheet():
@@ -65,6 +60,9 @@ def init_google_sheet():
         logging.info(f"Oczyszczone ID arkusza (Krypto): {repr(clean_sheet_id)} (długość: {len(clean_sheet_id)})")
         
         creds_dict = json.loads(GOOGLE_CREDENTIALS)
+        if "private_key" in creds_dict and isinstance(creds_dict["private_key"], str):
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
@@ -148,8 +146,8 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
             data = resp.json()
             for update in data.get("result", []):
                 cache["telegram_update_offset"] = update["update_id"]
-                msg_obj = update.get("message", {})
-                text = msg_obj.get("text", "").strip().lower()
+                msg_obj = update.get("message") or update.get("edited_message") or {}
+                text = str(msg_obj.get("text", "")).strip().lower()
                 chat_id = msg_obj.get("chat", {}).get("id")
 
                 if text.startswith(("/status", "/stan", "/start")):
@@ -158,35 +156,46 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                         sym_disp = r['symbol']
                         tv_sym = r.get('tv_symbol', sym_disp.replace("/", ""))
                         tv_link = f"[{sym_disp}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_sym})"
-                        status_msg += (
+                        row_line = (
                             f"{r['icon']} {tv_link}: `{r['price']}`\n"
                             f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'Brak SMA 200')}\n"
                             f"├ Pinbar: {r['pinbar']}\n"
                             f"└ Stan: {r['status']}\n\n"
                         )
+                        if len(status_msg) + len(row_line) > 3900:
+                            target_chat = chat_id or TELEGRAM_CHAT_ID
+                            await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
+                            status_msg = "📋 **AKTUALNY STAN RYNKU KRYPTO (c.d.)**\n───────────────────\n\n" + row_line
+                        else:
+                            status_msg += row_line
+
                     target_chat = chat_id or TELEGRAM_CHAT_ID
-                    if target_chat:
+                    if target_chat and status_msg:
                         await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
     except Exception as e:
         logging.error(f"Błąd przetwarzania komend Telegram: {e}")
 
 
 # --- 4. ANALIZA TECHNICZNA I DANE ---
-async def fetch_ohlcv_async(symbol, timeframe='4h', limit=250):
+async def fetch_ohlcv_async(exchange_inst, symbol, timeframe='4h', limit=250):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        ohlcv = await exchange_inst.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         return df
     except Exception as e:
         logging.warning(f"Błąd pobierania {symbol}: {e}")
         return None
 
-async def get_gbp_rate_async():
+async def get_gbp_rate_async(exchange_inst):
     try:
-        ticker = await exchange.fetch_ticker('USD/GBP')
-        return float(ticker['last'])
-    except Exception:
-        return 0.79
+        # Kraken kwotuje parę jako GBP/USD
+        ticker = await exchange_inst.fetch_ticker('GBP/USD')
+        gbp_usd = float(ticker['last'])
+        if gbp_usd > 0:
+            return 1.0 / gbp_usd
+    except Exception as e:
+        logging.warning(f"Błąd pobierania kursu GBP/USD z Krakena ({e}), stosuję fallback 0.79.")
+    return 0.79
 
 def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     delta = df['close'].diff()
@@ -207,6 +216,7 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     df['stoch_d'] = round(df['stoch_k'].rolling(window=3).mean(), 2)
     
     df['sma20'] = df['close'].rolling(window=20).mean()
+    df['sma50'] = df['close'].rolling(window=50).mean()
     df['sma200'] = df['close'].rolling(window=200).mean()
     df['std20'] = df['close'].rolling(window=20).std()
     df['bb_upper'] = df['sma20'] + (df['std20'] * 2)
@@ -214,6 +224,12 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
 
     df['vol_sma20'] = df['volume'].rolling(window=20).mean()
     
+    tr1 = df['high'] - df['low']
+    tr2 = abs(df['high'] - df['close'].shift(1))
+    tr3 = abs(df['low'] - df['close'].shift(1))
+    df['tr'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df['atr'] = df['tr'].rolling(window=14).mean()
+
     range_candle = df['high'] - df['low']
     body = abs(df['close'] - df['open'])
     
@@ -221,16 +237,31 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
     
     valid_range = range_candle > 0
-    has_strong_lower_wick = (lower_wick / range_candle) >= min_wick_ratio
-    has_small_upper_wick = (upper_wick / range_candle) <= max_upper_wick_ratio
-    has_small_body = (body / range_candle) <= 0.35
+    safe_range = range_candle.replace(0, pd.NA)
     
-    df['pinbar'] = valid_range & has_strong_lower_wick & has_small_upper_wick & has_small_body
+    has_strong_lower_wick = (lower_wick / safe_range) >= min_wick_ratio
+    has_small_upper_wick = (upper_wick / safe_range) <= max_upper_wick_ratio
+    has_small_body = (body / safe_range) <= 0.35
+    
+    df['pinbar'] = valid_range & has_strong_lower_wick.fillna(False) & has_small_upper_wick.fillna(False) & has_small_body.fillna(False)
     return df
 
 
-async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumping: bool = False):
-    """Pobiera i analizuje dane dla pojedynczej monety."""
+def eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200):
+    rsi_val = float(row['rsi'])
+    is_pinbar = bool(row['pinbar'])
+    bb_touched = row['low'] <= row['bb_lower']
+    
+    if (rsi_val <= rsi_signal_threshold and is_above_sma200) or (rsi_val <= 25.0):
+        return 'BUY_REBOUND'
+    elif is_pinbar and rsi_val <= max_pinbar_rsi and is_above_sma200:
+        return 'BUY_PINBAR'
+    elif bb_touched and rsi_val <= 50.0 and is_above_sma200:
+        return 'BUY_BOUNCE'
+    return 'NONE'
+
+
+async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: dict, btc_dumping: bool = False, pre_fetched_df=None):
     try:
         is_core = symbol in CORE_CRYPTO
         crypto_icon = '🏛' if is_core else '🚀'
@@ -239,12 +270,13 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         rsi_signal_threshold = 35.0 if is_core else 33.0
         max_pinbar_rsi = 40.0 if is_core else 36.0
         
-        df = await fetch_ohlcv_async(symbol)
-        if df is None or len(df) < 205:
+        df = pre_fetched_df if pre_fetched_df is not None else await fetch_ohlcv_async(exchange_inst, symbol)
+        if df is None or len(df) < 50:
             return None
 
         df = calculate_indicators(df, min_wick_ratio=pinbar_threshold, max_upper_wick_ratio=0.20)
 
+        # iloc[-2] to ostatnia ZAMKNIĘTA świeca, iloc[-3] to poprzednia
         last_row = df.iloc[-2]
         prev_row = df.iloc[-3]
 
@@ -252,22 +284,28 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         signal_low_native = float(last_row['low'])
         sma20_native = float(last_row['sma20'])
         bb_upper_native = float(last_row['bb_upper'])
+        atr_native = float(last_row['atr']) if pd.notna(last_row['atr']) else (signal_low_native * 0.01)
         
         rsi_4h = float(last_row['rsi'])
-        prev_rsi_4h = float(prev_row['rsi'])
 
         sma200_val = last_row['sma200']
+        sma50_val = last_row['sma50']
+        
         if pd.notna(sma200_val):
-            sma200_txt = "Powyżej SMA 200" if price_native >= sma200_val else "Poniżej SMA 200"
+            is_above_sma200 = (price_native >= sma200_val)
+            sma200_txt = "Powyżej SMA 200" if is_above_sma200 else "Poniżej SMA 200"
+        elif pd.notna(sma50_val):
+            is_above_sma200 = (price_native >= sma50_val)
+            sma200_txt = "Powyżej SMA 50 (Młoda)" if is_above_sma200 else "Poniżej SMA 50 (Młoda)"
         else:
-            sma200_txt = "Brak SMA 200"
+            is_above_sma200 = True
+            sma200_txt = "Brak SMA (Młoda)"
 
         stoch_k = float(last_row['stoch_k'])
         prev_stoch_k = float(prev_row['stoch_k'])
         stoch_turning_up = (prev_stoch_k <= 25.0 or stoch_k <= 25.0) and (stoch_k > prev_stoch_k)
 
         is_pinbar = bool(last_row['pinbar'])
-        prev_pinbar = bool(prev_row['pinbar'])
 
         ts_closed = int(last_row['timestamp'] / 1000)
 
@@ -281,7 +319,6 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
 
         tv_clean_symbol = symbol.replace("/", "")
 
-        # Przeliczenie walutowe
         fx_ratio = usd_to_gbp if 'USD' in symbol else 1.0
         symbol_display = symbol.replace('USD', 'GBP') if 'USD' in symbol else symbol
 
@@ -289,12 +326,13 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         low_gbp = signal_low_native * fx_ratio
         sma20_gbp = sma20_native * fx_ratio
         bb_upper_gbp = bb_upper_native * fx_ratio
+        atr_gbp = atr_native * fx_ratio
 
         price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
 
-        # --- DYNAMICZNY PLAN TRANSAKCYJNY ---
-        soft_sl_gbp = low_gbp * 0.998       # Unieważnienie (-0.2% pod dołkiem)
-        hard_sl_gbp = low_gbp * 0.96        # Awaryjny SL (-4.0% na krach)
+        # SL / TP Plan
+        soft_sl_gbp = max(0.0001, low_gbp - (1.5 * atr_gbp))
+        hard_sl_gbp = min(soft_sl_gbp * 0.98, low_gbp * 0.95)
         
         tp_gbp = bb_upper_gbp if price_gbp >= sma20_gbp else sma20_gbp
 
@@ -306,19 +344,15 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
         hard_risk_pct = round(((price_gbp - hard_sl_gbp) / price_gbp) * 100, 2)
         tp_pct = round(((tp_gbp - price_gbp) / price_gbp) * 100, 2)
 
-        rr_ratio = round(tp_pct / risk_pct, 2) if risk_pct > 0 else 0.0
+        net_tp_pct = max(0.0, tp_pct - 0.60)
+        net_risk_pct = risk_pct + 0.60
+        rr_ratio = round(net_tp_pct / net_risk_pct, 2) if net_risk_pct > 0 else 0.0
 
-        # --- FILTROWANIE WARUNKÓW (Z TWARDYM FILTREM WOLUMENU 110%) ---
         bb_touched = last_row['low'] <= last_row['bb_lower']
 
         raw_signal = 'NONE'
         if vol_ratio >= 110:
-            if (rsi_4h <= rsi_signal_threshold) or (bb_touched and rsi_4h <= rsi_signal_threshold):
-                raw_signal = 'BUY_REBOUND'
-            elif is_pinbar and rsi_4h <= max_pinbar_rsi:
-                raw_signal = 'BUY_PINBAR'
-            elif bb_touched and rsi_4h <= 50.0:
-                raw_signal = 'BUY_BOUNCE'
+            raw_signal = eval_signal(last_row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200)
 
         blocked_by_guard = False
         if raw_signal != 'NONE':
@@ -360,20 +394,12 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
             candle_key = f"ALERT_{symbol_display}_{ts_closed}_{current_signal_type}"
             already_alerted = (cache.get(candle_key) is not None)
 
-            is_new_signal = False
-            if current_signal_type == 'BUY_REBOUND':
-                prev_bb_touched = prev_row['low'] <= prev_row['bb_lower']
-                prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_bb_touched and prev_rsi_4h <= rsi_signal_threshold)
-                is_new_signal = not prev_was_rebound
-            elif current_signal_type == 'BUY_PINBAR':
-                prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
-                is_new_signal = not prev_was_pinbar
-            elif current_signal_type == 'BUY_BOUNCE':
-                prev_bb_touched = prev_row['low'] <= prev_row['bb_lower']
-                prev_was_bounce = prev_bb_touched and (prev_rsi_4h <= 50.0)
-                is_new_signal = not prev_was_bounce
+            prev_sma200_val = prev_row['sma200']
+            prev_is_above_sma200 = pd.notna(prev_sma200_val) and (float(prev_row['close']) >= prev_sma200_val) if pd.notna(prev_sma200_val) else is_above_sma200
+            
+            prev_raw_signal = eval_signal(prev_row, rsi_signal_threshold, max_pinbar_rsi, prev_is_above_sma200)
+            is_new_signal = (prev_raw_signal != current_signal_type)
 
-            # WYSYŁA ALERT TYLKO GDY R:R >= 1.0
             should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.0)
 
             if should_alert:
@@ -400,7 +426,14 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                     status_emoji = "🟡"
                     limit_price_gbp = (price_gbp + low_gbp) / 2
                     limit_price_disp = f"£{limit_price_gbp:,.2f}" if limit_price_gbp >= 1.0 else f"£{limit_price_gbp:,.4f}"
-                    entry_line = f"├ 🟡 **Ustaw Limit (50% knota):** `{limit_price_disp}`"
+                    
+                    lim_risk_pct = round(((limit_price_gbp - soft_sl_gbp) / limit_price_gbp) * 100, 2)
+                    lim_tp_pct = round(((tp_gbp - limit_price_gbp) / limit_price_gbp) * 100, 2)
+                    lim_net_tp = max(0.0, lim_tp_pct - 0.60)
+                    lim_net_risk = lim_risk_pct + 0.60
+                    lim_rr = round(lim_net_tp / lim_net_risk, 2) if lim_net_risk > 0 else rr_ratio
+                    
+                    entry_line = f"├ 🟡 **Ustaw Limit (50% knota):** `{limit_price_disp}` (Lepsze R:R -> `1 : {lim_rr}`)"
 
                 alert_header = f"🟡 **STREFA ODBICIA (BOUNCE ZONE 4H)** {status_emoji}" if current_signal_type == 'BUY_BOUNCE' else f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)** {status_emoji}"
 
@@ -415,7 +448,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
                     f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
                     f"├ 🛡 **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
                     f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
-                    f"└ ⚖️ **Stosunek R:R:** `1 : {rr_ratio}`\n\n"
+                    f"└ ⚖️ **Stosunek R:R (netto):** `1 : {rr_ratio}`\n\n"
                     f"📈 **Potwierdzenia rynkowe:**{conf_msg}\n\n"
                     f"👁 [Zobacz wykres na TradingView]({tv_link})"
                 )
@@ -437,7 +470,7 @@ async def process_symbol(symbol: str, usd_to_gbp: float, cache: dict, btc_dumpin
 # --- 5. GŁÓWNA PĘTLA APLIKACJI ---
 async def main():
     start_time = time.time()
-    logging.info("Uruchamianie Skanera Krypto V2.2...")
+    logging.info("Uruchamianie Skanera Krypto V2.2 (Zoptymalizowany i Bezbledny)...")
 
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
@@ -447,17 +480,22 @@ async def main():
     sheet = init_google_sheet()
     cache = load_cache()
 
-    try:
-        usd_to_gbp = await get_gbp_rate_async()
+    exchange = ccxt.kraken({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'}
+    })
 
-        # --- KASKADOWY FILTR BITCOINA (BTC DUMP GUARD) ---
+    try:
+        usd_to_gbp = await get_gbp_rate_async(exchange)
+
         btc_dumping = False
+        btc_prefetched_df = None
         try:
-            btc_df = await fetch_ohlcv_async('BTC/GBP')
-            if btc_df is not None and len(btc_df) >= 200:
-                btc_df = calculate_indicators(btc_df)
-                btc_last = btc_df.iloc[-2]
-                btc_prev = btc_df.iloc[-3]
+            btc_prefetched_df = await fetch_ohlcv_async(exchange, 'BTC/GBP')
+            if btc_prefetched_df is not None and len(btc_prefetched_df) >= 50:
+                btc_calc = calculate_indicators(btc_prefetched_df.copy())
+                btc_last = btc_calc.iloc[-2]
+                btc_prev = btc_calc.iloc[-3]
                 
                 btc_change = ((btc_last['close'] - btc_prev['close']) / btc_prev['close']) * 100
                 btc_rsi = float(btc_last['rsi'])
@@ -474,8 +512,15 @@ async def main():
         rows_to_append_sheets = []
         success_count = 0
 
+        semaphore = asyncio.asyncio.Semaphore(3) if hasattr(asyncio, 'asyncio') else asyncio.Semaphore(3)
+
+        async def sem_process(symbol):
+            async with semaphore:
+                pre_df = btc_prefetched_df if symbol == 'BTC/GBP' else None
+                return await process_symbol(exchange, symbol, usd_to_gbp, cache, btc_dumping=btc_dumping, pre_fetched_df=pre_df)
+
         async with httpx.AsyncClient() as http_client:
-            tasks = [process_symbol(symbol, usd_to_gbp, cache, btc_dumping=btc_dumping) for symbol in SYMBOLS]
+            tasks = [sem_process(symbol) for symbol in SYMBOLS]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for res in results:
@@ -538,8 +583,9 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except Exception as e:
+        clean_err = str(e).replace('_', '\\_').replace('*', '\\*')
         logging.critical(f"🚨 KRYTYCZNY BŁĄD SKANERA KRYPTO: {e}", exc_info=True)
-        err_msg = f'🚨 **🔴 KRYTYCZNY BŁĄD SKANERA KRYPTO:**\n`{str(e)}`'
+        err_msg = f'🚨 **🔴 KRYTYCZNY BŁĄD SKANERA KRYPTO:**\n`{clean_err}`'
         
         async def send_critical_error():
             async with httpx.AsyncClient() as http_client:
