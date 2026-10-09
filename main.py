@@ -29,19 +29,12 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS') or os.getenv('GOOGLE_TASKS_CREDENTIALS')
 
-CORE_CRYPTO = ['BTC/GBP', 'ETH/GBP']
-ALT_CRYPTO = [
-    'SOL/GBP', 'TAO/USD', 'RENDER/USD', 
-    'ONDO/USD', 'XRP/GBP', 'LINK/GBP', 
-    'SUI/GBP', 'AAVE/GBP', 'FET/USD', 
-    'NEAR/USD', 'HNT/USD', 'ARB/USD'
-]
+# Sztywny podział na 3 paczki po dokładnie 6 aktywów (3 x 6 = 18) z nowymi altami (AVAX, APT, INJ, TIA)
+CRYPTO_P1 = ['BTC/GBP', 'ETH/GBP', 'SOL/GBP', 'TAO/USD', 'RENDER/USD', 'ONDO/USD']
+CRYPTO_P2 = ['XRP/GBP', 'LINK/GBP', 'SUI/GBP', 'AAVE/GBP', 'FET/USD', 'NEAR/USD']
+CRYPTO_P3 = ['HNT/USD', 'ARB/USD', 'AVAX/USD', 'APT/USD', 'INJ/USD', 'TIA/USD']
 
-env_crypto = os.getenv('CRYPTO_PAIRS')
-if env_crypto:
-    SYMBOLS = [s.strip() for s in env_crypto.split(',') if s.strip()]
-else:
-    SYMBOLS = CORE_CRYPTO + ALT_CRYPTO
+SYMBOLS = CRYPTO_P1 + CRYPTO_P2 + CRYPTO_P3
 
 CACHE_FILE = 'cache_krypto.json'
 
@@ -147,26 +140,49 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                 chat_id = msg_obj.get("chat", {}).get("id")
 
                 if text.startswith(("/status", "/stan", "/start")):
-                    status_msg = "📋 **CURRENT CRYPTO MARKET STATUS**\n───────────────────\n\n"
-                    for r in digest_rows:
-                        sym_disp = r['symbol']
-                        tv_sym = r.get('tv_symbol', sym_disp.replace("/", ""))
-                        tv_link = f"[{sym_disp}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_sym})"
-                        row_line = (
-                            f"{r['icon']} {tv_link}: `{r['price']}`\n"
-                            f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'No SMA 200')}\n"
-                            f"├ Pinbar: {r['pinbar']}\n"
-                            f"└ Status: {r['status']}\n\n"
-                        )
-                        if len(status_msg) + len(row_line) > 3900:
-                            target_chat = chat_id or TELEGRAM_CHAT_ID
-                            await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
-                            status_msg = "📋 **CURRENT CRYPTO MARKET STATUS (cont.)**\n───────────────────\n\n" + row_line
-                        else:
-                            status_msg += row_line
+                    p1_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P1]
+                    p2_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P2]
+                    p3_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P3]
+
                     target_chat = chat_id or TELEGRAM_CHAT_ID
-                    if target_chat and status_msg:
-                        await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
+
+                    if p1_rows:
+                        status_msg_p1 = "🚀 **CRYPTO MARKET STATUS (1/3)**\n───────────────────\n\n"
+                        for r in p1_rows:
+                            tv_link = f"[{r['symbol']}](https://www.tradingview.com/chart/?symbol=KRAKEN:{r['tv_symbol']})"
+                            status_msg_p1 += (
+                                f"🚀 {tv_link}: `{r['price']}`\n"
+                                f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'No SMA 200')}\n"
+                                f"├ Pinbar: {r['pinbar']}\n"
+                                f"└ Status: {r['status']}\n\n"
+                            )
+                        await send_telegram_alert_async(http_client, status_msg_p1.strip(), custom_chat_id=target_chat)
+                        await asyncio.sleep(0.5)
+
+                    if p2_rows:
+                        status_msg_p2 = "🚀 **CRYPTO MARKET STATUS (2/3)**\n───────────────────\n\n"
+                        for r in p2_rows:
+                            tv_link = f"[{r['symbol']}](https://www.tradingview.com/chart/?symbol=KRAKEN:{r['tv_symbol']})"
+                            status_msg_p2 += (
+                                f"🚀 {tv_link}: `{r['price']}`\n"
+                                f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'No SMA 200')}\n"
+                                f"├ Pinbar: {r['pinbar']}\n"
+                                f"└ Status: {r['status']}\n\n"
+                            )
+                        await send_telegram_alert_async(http_client, status_msg_p2.strip(), custom_chat_id=target_chat)
+                        await asyncio.sleep(0.5)
+
+                    if p3_rows:
+                        status_msg_p3 = "🚀 **CRYPTO MARKET STATUS (3/3)**\n───────────────────\n\n"
+                        for r in p3_rows:
+                            tv_link = f"[{r['symbol']}](https://www.tradingview.com/chart/?symbol=KRAKEN:{r['tv_symbol']})"
+                            status_msg_p3 += (
+                                f"🚀 {tv_link}: `{r['price']}`\n"
+                                f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'No SMA 200')}\n"
+                                f"├ Pinbar: {r['pinbar']}\n"
+                                f"└ Status: {r['status']}\n\n"
+                            )
+                        await send_telegram_alert_async(http_client, status_msg_p3.strip(), custom_chat_id=target_chat)
     except Exception as e:
         logging.error(f"Błąd Telegram Commands: {e}")
 
@@ -250,10 +266,8 @@ def eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_
     is_pinbar = bool(row['pinbar'])
     bb_touched = float(row['low']) <= float(row['bb_lower'])
     
-    # KRYTYCZNE ZABEZPIECZENIE: Świeca musi być zielona (Odbicie musi być potwierdzone bykami)
     is_green = float(row['close']) > float(row['open'])
     
-    # 🛑 Trend spadkowy pod 200 SMA -> Tylko ekstremalne okazje z potwierdzeniem
     if not is_above_sma200:
         if is_pinbar and rsi_val <= 30.0 and is_green:
             return 'BUY_PINBAR'
@@ -261,7 +275,6 @@ def eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_
             return 'BUY_REBOUND'
         return 'NONE'
 
-    # ✅ Normalne sygnały (nad 200 SMA)
     if is_pinbar and rsi_val <= max_pinbar_rsi:
         return 'BUY_PINBAR'
     
@@ -276,14 +289,13 @@ def eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_
 
 async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: dict, btc_dumping: bool = False, pre_fetched_df_4h=None):
     try:
-        is_core = symbol in CORE_CRYPTO
-        crypto_icon = '🏛' if is_core else '🚀'
+        is_core = symbol in ['BTC/GBP', 'ETH/GBP']
+        crypto_icon = '🚀' # Ujednolicone na rakietkę dla wszystkich
         
         pinbar_threshold = 0.50 if is_core else 0.60
         rsi_signal_threshold = 35.0 if is_core else 33.0
         max_pinbar_rsi = 40.0 if is_core else 36.0
         
-        # Pobieranie równoległe 4H (jeśli brak) i 1D (dla filtra makro)
         if pre_fetched_df_4h is not None:
             df = pre_fetched_df_4h
             df_1d = await fetch_ohlcv_async(exchange_inst, symbol, timeframe='1d', limit=30)
@@ -311,7 +323,6 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
         sma200_val = last_row['sma200']
         sma50_val = last_row['sma50']
         
-        # Bezpieczna obsługa typów Pandas
         if pd.notna(sma200_val):
             is_above_sma200 = (price_native >= float(sma200_val))
             sma200_txt = "Above 200 SMA" if is_above_sma200 else "Below 200 SMA"
@@ -329,7 +340,6 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
         is_pinbar = bool(last_row['pinbar'])
         ts_closed = int(last_row['timestamp'] / 1000)
 
-        # Precyzyjne liczenie wolumenów do deduplikacji
         def get_vol_ratio(r):
             v_t = float(r['volume'])
             v_s = float(r['vol_sma20']) if pd.notna(r['vol_sma20']) else 0.0
@@ -340,14 +350,12 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
         
         volume_str = f"{vol_ratio}% of avg {'🟢 (High)' if vol_ratio >= 120 else ('🔴 (Low)' if vol_ratio <= 80 else '🟡 (Standard)')}"
 
-        # 🛡 FILTR 1D (MAKRO) - Zapobiega kupowaniu w trakcie wolnego krachu
         is_1d_safe = True
         if df_1d is not None and len(df_1d) >= 14:
             df_1d = calculate_indicators(df_1d)
             last_1d = df_1d.iloc[-2]
             rsi_1d = float(last_1d['rsi'])
             if pd.notna(last_1d['sma50']):
-                # Jeśli mocno spada na 1D i jest pod SMA50 dziennym -> ODRZUĆ
                 if rsi_1d < 38.0 and float(last_1d['close']) < float(last_1d['sma50']):
                     is_1d_safe = False
 
@@ -363,12 +371,8 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
 
         price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
 
-        # 🎯 RYGORYSTYCZNY SL / TP PLAN
         soft_sl_gbp = max(0.000001, low_gbp - (1.5 * atr_gbp))
-        # Gwarancja, że Hard SL matematycznie zmieści się pod Soft SL bez awarii
         hard_sl_gbp = max(0.000001, min(soft_sl_gbp * 0.98, low_gbp * 0.95))
-        
-        # Target: Jeśli odbijamy z samego dołu, oporem jest SMA20, a nie nierealne górne BB
         tp_gbp = sma20_gbp if price_gbp < sma20_gbp else bb_upper_gbp
 
         soft_sl_disp = f"£{soft_sl_gbp:,.2f}" if soft_sl_gbp >= 1.0 else f"£{soft_sl_gbp:,.4f}"
@@ -385,7 +389,6 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
 
         bb_touched = float(last_row['low']) <= float(last_row['bb_lower'])
 
-        # Ewaluacja bieżąca
         raw_signal = eval_signal(last_row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_ratio)
 
         blocked_by_guard = False
@@ -416,6 +419,7 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
             f"└ Status: {status_txt}\n\n"
         )
         digest_summary_row = {
+            'raw_symbol': symbol,
             'symbol': symbol_display, 'icon': crypto_icon,
             'price': price_disp, 'rsi': rsi_4h, 'sma200': sma200_txt, 'pinbar': pinbar_txt,
             'status': status_txt, 'tv_symbol': tv_clean_symbol
@@ -428,14 +432,12 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
             candle_key = f"ALERT_{symbol_display}_{ts_closed}_{current_signal_type}"
             already_alerted = (cache.get(candle_key) is not None)
 
-            # BEZBŁĘDNA Deduplikacja z poprzednią świecą
             prev_sma200_val = prev_row['sma200']
             prev_is_above_sma200 = pd.notna(prev_sma200_val) and (float(prev_row['close']) >= float(prev_sma200_val)) if pd.notna(prev_sma200_val) else is_above_sma200
             
             prev_raw_signal = eval_signal(prev_row, rsi_signal_threshold, max_pinbar_rsi, prev_is_above_sma200, prev_vol_ratio)
             is_new_signal = (prev_raw_signal != current_signal_type)
 
-            # Wysyłaj tylko gdy mamy minimum opłacalności (1.2 R:R dla bezpieczeństwa)
             should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.2)
 
             if should_alert:
@@ -489,7 +491,7 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
                     f"📈 **Market Confirmations:**{conf_msg}\n\n"
                     f"👁 [View Chart on TradingView]({tv_link})"
                 )
-                pending_alert = (body, symbol_display, status_txt, price_disp, rsi_val)
+                pending_alert = (body, symbol_display, status_txt, price_disp, rsi_4h)
 
         return {
             'digest_line': digest_line,
@@ -542,7 +544,9 @@ async def main():
         except Exception as e:
             logging.error(f"Błąd sprawdzania statusu BTC: {e}")
 
-        digest_lines = []
+        digest_lines_p1 = []
+        digest_lines_p2 = []
+        digest_lines_p3 = []
         digest_summary_rows = []
         pending_alerts = []
         rows_to_append_sheets = []
@@ -564,7 +568,14 @@ async def main():
                     continue
 
                 success_count += 1
-                digest_lines.append(res['digest_line'])
+                raw_sym = res['digest_summary_row']['raw_symbol']
+                if raw_sym in CRYPTO_P1:
+                    digest_lines_p1.append(res['digest_line'])
+                elif raw_sym in CRYPTO_P2:
+                    digest_lines_p2.append(res['digest_line'])
+                else:
+                    digest_lines_p3.append(res['digest_line'])
+
                 digest_summary_rows.append(res['digest_summary_row'])
 
                 if res['pending_alert'] and res['candle_key']:
@@ -576,11 +587,24 @@ async def main():
             logging.info(health_summary.replace('**', '').replace('`', ''))
 
             write_github_step_summary(digest_summary_rows, health_msg=health_summary)
-            await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
-            if github_event == 'workflow_dispatch' and digest_lines:
-                manual_digest_msg = '🎯 **MANUAL CRYPTO MARKET SCAN**\n───────────────────\n\n' + ''.join(digest_lines)
-                await send_telegram_alert_async(http_client, manual_digest_msg)
+            # Ręczny skan w 3 czystych paczkach po dokładnie 6 pozycji
+            if github_event == 'workflow_dispatch':
+                if digest_lines_p1:
+                    msg_p1 = "🎯 **MANUAL CRYPTO MARKET SCAN (1/3)**\n───────────────────\n\n" + ''.join(digest_lines_p1).strip()
+                    await send_telegram_alert_async(http_client, msg_p1)
+                    await asyncio.sleep(0.5)
+
+                if digest_lines_p2:
+                    msg_p2 = "🎯 **MANUAL CRYPTO MARKET SCAN (2/3)**\n───────────────────\n\n" + ''.join(digest_lines_p2).strip()
+                    await send_telegram_alert_async(http_client, msg_p2)
+                    await asyncio.sleep(0.5)
+
+                if digest_lines_p3:
+                    msg_p3 = "🎯 **MANUAL CRYPTO MARKET SCAN (3/3)**\n───────────────────\n\n" + ''.join(digest_lines_p3).strip()
+                    await send_telegram_alert_async(http_client, msg_p3)
+
+            await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
             if pending_alerts:
                 for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
@@ -601,11 +625,23 @@ async def main():
                 except Exception as e:
                     logging.error(f"Błąd zapisu w Google Sheets: {e}")
 
+            # Raport daily o 21:00 w 3 paczkach po 6 pozycji
             if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
-                if digest_lines:
-                    digest_msg = '📋 **DAILY CRYPTO MARKET DIGEST**\n───────────────────\n\n' + ''.join(digest_lines)
-                    await send_telegram_alert_async(http_client, digest_msg)
-                    cache['DIGEST_DATE'] = today_str
+                if digest_lines_p1:
+                    msg_p1 = "📋 **DAILY CRYPTO MARKET DIGEST (1/3)**\n───────────────────\n\n" + ''.join(digest_lines_p1).strip()
+                    await send_telegram_alert_async(http_client, msg_p1)
+                    await asyncio.sleep(0.5)
+
+                if digest_lines_p2:
+                    msg_p2 = "📋 **DAILY CRYPTO MARKET DIGEST (2/3)**\n───────────────────\n\n" + ''.join(digest_lines_p2).strip()
+                    await send_telegram_alert_async(http_client, msg_p2)
+                    await asyncio.sleep(0.5)
+
+                if digest_lines_p3:
+                    msg_p3 = "📋 **DAILY CRYPTO MARKET DIGEST (3/3)**\n───────────────────\n\n" + ''.join(digest_lines_p3).strip()
+                    await send_telegram_alert_async(http_client, msg_p3)
+
+                cache['DIGEST_DATE'] = today_str
 
             save_cache(cache)
 
