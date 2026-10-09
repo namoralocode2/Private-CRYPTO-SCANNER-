@@ -147,21 +147,21 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                 chat_id = msg_obj.get("chat", {}).get("id")
 
                 if text.startswith(("/status", "/stan", "/start")):
-                    status_msg = "📋 **AKTUALNY STAN RYNKU KRYPTO**\n───────────────────\n\n"
+                    status_msg = "📋 **CURRENT CRYPTO MARKET STATUS**\n───────────────────\n\n"
                     for r in digest_rows:
                         sym_disp = r['symbol']
                         tv_sym = r.get('tv_symbol', sym_disp.replace("/", ""))
                         tv_link = f"[{sym_disp}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_sym})"
                         row_line = (
                             f"{r['icon']} {tv_link}: `{r['price']}`\n"
-                            f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'Brak SMA 200')}\n"
+                            f"├ RSI (4H): `{r['rsi']}` | {r.get('sma200', 'No SMA 200')}\n"
                             f"├ Pinbar: {r['pinbar']}\n"
-                            f"└ Stan: {r['status']}\n\n"
+                            f"└ Status: {r['status']}\n\n"
                         )
                         if len(status_msg) + len(row_line) > 3900:
                             target_chat = chat_id or TELEGRAM_CHAT_ID
                             await send_telegram_alert_async(http_client, status_msg, custom_chat_id=target_chat)
-                            status_msg = "📋 **AKTUALNY STAN RYNKU KRYPTO (c.d.)**\n───────────────────\n\n" + row_line
+                            status_msg = "📋 **CURRENT CRYPTO MARKET STATUS (cont.)**\n───────────────────\n\n" + row_line
                         else:
                             status_msg += row_line
                     target_chat = chat_id or TELEGRAM_CHAT_ID
@@ -314,13 +314,13 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
         # Bezpieczna obsługa typów Pandas
         if pd.notna(sma200_val):
             is_above_sma200 = (price_native >= float(sma200_val))
-            sma200_txt = "Powyżej SMA 200" if is_above_sma200 else "Poniżej SMA 200"
+            sma200_txt = "Above 200 SMA" if is_above_sma200 else "Below 200 SMA"
         elif pd.notna(sma50_val):
             is_above_sma200 = (price_native >= float(sma50_val))
-            sma200_txt = "Powyżej SMA 50 (Młoda)" if is_above_sma200 else "Poniżej SMA 50 (Młoda)"
+            sma200_txt = "Above 50 SMA (New)" if is_above_sma200 else "Below 50 SMA (New)"
         else:
             is_above_sma200 = True
-            sma200_txt = "Brak SMA (Młoda)"
+            sma200_txt = "No SMA (New)"
 
         stoch_k = float(last_row['stoch_k'])
         prev_stoch_k = float(prev_row['stoch_k'])
@@ -338,7 +338,7 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
         vol_ratio = get_vol_ratio(last_row)
         prev_vol_ratio = get_vol_ratio(prev_row)
         
-        volume_str = f"{vol_ratio}% średniej {'🟢 (Wysoki)' if vol_ratio >= 120 else ('🔴 (Niski)' if vol_ratio <= 80 else '🟡 (Standard)')}"
+        volume_str = f"{vol_ratio}% of avg {'🟢 (High)' if vol_ratio >= 120 else ('🔴 (Low)' if vol_ratio <= 80 else '🟡 (Standard)')}"
 
         # 🛡 FILTR 1D (MAKRO) - Zapobiega kupowaniu w trakcie wolnego krachu
         is_1d_safe = True
@@ -399,13 +399,13 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
             current_signal_type = 'NONE'
 
         status_map = {
-            'NONE': '🛡 Blokada (Ryzyko spadków)' if blocked_by_guard else '⚪ Neutralny',
-            'BUY_REBOUND': '⚡️ SZYBKIE ODBICIE (Popyt)',
-            'BUY_PINBAR': '🕯️ PINBAR ODBICIE',
-            'BUY_BOUNCE': '🟡 STREFA ODBICIA'
+            'NONE': '🛡 Blocked (Downside Risk)' if blocked_by_guard else '⚪ Neutral',
+            'BUY_REBOUND': '⚡️ QUICK REBOUND (Demand)',
+            'BUY_PINBAR': '🕯️ PINBAR REBOUND',
+            'BUY_BOUNCE': '🟡 BOUNCE ZONE'
         }
-        status_txt = status_map.get(current_signal_type, '⚪ Neutralny')
-        pinbar_txt = f"{int(pinbar_threshold * 100)}%" if is_pinbar else "Brak"
+        status_txt = status_map.get(current_signal_type, '⚪ Neutral')
+        pinbar_txt = f"{int(pinbar_threshold * 100)}%" if is_pinbar else "None"
 
         tv_link_symbol = f"[{symbol_display}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol})"
 
@@ -413,7 +413,7 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
             f"{crypto_icon} {tv_link_symbol}: `{price_disp}`\n"
             f"├ RSI (4H): `{rsi_4h}` | {sma200_txt}\n"
             f"├ Pinbar: {pinbar_txt}\n"
-            f"└ Stan: {status_txt}\n\n"
+            f"└ Status: {status_txt}\n\n"
         )
         digest_summary_row = {
             'symbol': symbol_display, 'icon': crypto_icon,
@@ -441,24 +441,24 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
             if should_alert:
                 tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
                 confirmations = []
-                confirmations.append(f"📈 **Trend główny:** {sma200_txt}")
-                confirmations.append("🛡 **Trend Makro (1D):** Bezpieczny (Brak wodospadu)")
+                confirmations.append(f"📈 **Main Trend:** {sma200_txt}")
+                confirmations.append("🛡 **Macro Trend (1D):** Safe (No Dump)")
                 if is_pinbar:
-                    confirmations.append(f"🕯 **Knot popytowy 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
+                    confirmations.append(f"🕯 **Demand Wick 4H (Pinbar >= {int(pinbar_threshold * 100)}%)**")
                 if float(last_row['close']) > float(last_row['open']):
-                    confirmations.append("🟩 **Bycze zamknięcie:** Świeca zamknęła się na zielono")
+                    confirmations.append("🟩 **Bullish Close:** Candle closed green")
                 if bb_touched:
-                    confirmations.append("📉 **Knot przetestował dolną Wstęgi Bollingera (20, 2)**")
+                    confirmations.append("📉 **Wick tested Lower Bollinger Band (20, 2)**")
                 if stoch_turning_up:
-                    confirmations.append(f"🔄 **Stochastic RSI wygina się w górę (%K: `{stoch_k}`)**")
-                confirmations.append(f"📊 **Wolumen:** {volume_str}")
+                    confirmations.append(f"🔄 **Stochastic RSI curving up (%K: `{stoch_k}`)**")
+                confirmations.append(f"📊 **Volume:** {volume_str}")
 
                 conf_msg = "\n" + "\n".join(confirmations)
-                tp_target_name = "Średnia SMA 20" if price_gbp < sma20_gbp else "Górna BB 20"
+                tp_target_name = "SMA 20 Avg" if price_gbp < sma20_gbp else "Upper BB 20"
 
                 if rr_ratio >= 1.5:
                     status_emoji = "🟢"
-                    entry_line = f"├ 🟢 **Kupuj (Market):** `{price_disp}`"
+                    entry_line = f"├ 🟢 **Buy (Market):** `{price_disp}`"
                 else:
                     status_emoji = "🟡"
                     limit_price_gbp = (price_gbp + low_gbp) / 2
@@ -470,26 +470,26 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
                     lim_net_risk = lim_risk_pct + 0.60
                     lim_rr = round(lim_net_tp / lim_net_risk, 2) if lim_net_risk > 0 else rr_ratio
                     
-                    entry_line = f"├ 🟡 **Ustaw Limit (50% knota):** `{limit_price_disp}` (Lepsze R:R -> `1 : {lim_rr}`)"
+                    entry_line = f"├ 🟡 **Set Limit (50% Wick):** `{limit_price_disp}` (Better R:R -> `1 : {lim_rr}`)"
 
-                alert_header = f"🟡 **STREFA ODBICIA (BOUNCE ZONE 4H)** {status_emoji}" if current_signal_type == 'BUY_BOUNCE' else f"⚡️ **SZYBKA OKAZJA NA ODBICIE (SWING 4H)** {status_emoji}"
+                alert_header = f"🟡 **BOUNCE ZONE (4H)** {status_emoji}" if current_signal_type == 'BUY_BOUNCE' else f"⚡️ **QUICK REBOUND OPPORTUNITY (SWING 4H)** {status_emoji}"
 
                 body = (
                     f"{alert_header}\n"
                     f"───────────────────\n"
-                    f"{crypto_icon} **Moneta:** [{symbol_display}]({tv_link})\n"
-                    f"💰 **Cena rynkowa:** `{price_disp}`\n"
+                    f"{crypto_icon} **Asset:** [{symbol_display}]({tv_link})\n"
+                    f"💰 **Market Price:** `{price_disp}`\n"
                     f"📊 **RSI (4H):** `{rsi_4h}`\n\n"
-                    f"⚙️ **PLAN TRANSAKCYJNY**\n"
+                    f"⚙️ **TRADE PLAN**\n"
                     f"{entry_line}\n"
-                    f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
-                    f"├ 🛡 **Awaryjny SL (giełda - krach):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
-                    f"├ 🎯 **Cel zysku ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
-                    f"└ ⚖️ **Stosunek R:R (netto):** `1 : {rr_ratio}`\n\n"
-                    f"📈 **Potwierdzenia rynkowe:**{conf_msg}\n\n"
-                    f"👁 [Zobacz wykres na TradingView]({tv_link})"
+                    f"├ ⚠️ **Exit (4H Close Below):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
+                    f"├ 🛡 **Emergency SL (Exchange Crash):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
+                    f"├ 🎯 **Take Profit ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
+                    f"└ ⚖️ **R:R Ratio (Net):** `1 : {rr_ratio}`\n\n"
+                    f"📈 **Market Confirmations:**{conf_msg}\n\n"
+                    f"👁 [View Chart on TradingView]({tv_link})"
                 )
-                pending_alert = (body, symbol_display, status_txt, price_disp, rsi_4h)
+                pending_alert = (body, symbol_display, status_txt, price_disp, rsi_val)
 
         return {
             'digest_line': digest_line,
@@ -579,7 +579,7 @@ async def main():
             await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
             if github_event == 'workflow_dispatch' and digest_lines:
-                manual_digest_msg = '🎯 **RĘCZNY SKAN RYNKU KRYPTO**\n───────────────────\n\n' + ''.join(digest_lines)
+                manual_digest_msg = '🎯 **MANUAL CRYPTO MARKET SCAN**\n───────────────────\n\n' + ''.join(digest_lines)
                 await send_telegram_alert_async(http_client, manual_digest_msg)
 
             if pending_alerts:
@@ -603,7 +603,7 @@ async def main():
 
             if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
                 if digest_lines:
-                    digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU KRYPTO - 21:00**\n───────────────────\n\n' + ''.join(digest_lines)
+                    digest_msg = '📋 **DAILY CRYPTO MARKET DIGEST**\n───────────────────\n\n' + ''.join(digest_lines)
                     await send_telegram_alert_async(http_client, digest_msg)
                     cache['DIGEST_DATE'] = today_str
 
@@ -621,7 +621,7 @@ if __name__ == '__main__':
     except Exception as e:
         clean_err = str(e).replace('_', '\\_').replace('*', '\\*')
         logging.critical(f"🚨 KRYTYCZNY BŁĄD SKANERA KRYPTO: {e}", exc_info=True)
-        err_msg = f'🚨 **🔴 KRYTYCZNY BŁĄD SKANERA KRYPTO:**\n`{clean_err}`'
+        err_msg = f'🚨 **🔴 CRITICAL CRYPTO SCANNER ERROR:**\n`{clean_err}`'
         async def send_critical_error():
             async with httpx.AsyncClient() as http_client:
                 await send_telegram_alert_async(http_client, err_msg)
