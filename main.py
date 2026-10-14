@@ -456,7 +456,7 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
                 confirmations.append(f"📊 **Volume:** {volume_str}")
 
                 conf_msg = "\n" + "\n".join(confirmations)
-                tp_target_name = "SMA 20 Avg" if price_gbp < sma20_gbp else "Upper BB 20"
+                tp_target_name = "Upper BB 20" if price_gbp >= sma20_gbp else "Middle BB 20"
 
                 if rr_ratio >= 1.5:
                     status_emoji = "🟢"
@@ -486,8 +486,9 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
                     f"{entry_line}\n"
                     f"├ ⚠️ **Exit (4H Close Below):** `{soft_sl_disp}` (`-{risk_pct}%`)\n"
                     f"├ 🛡 **Emergency SL (Exchange Crash):** `{hard_sl_disp}` (`-{hard_risk_pct}%`)\n"
-                    f"├ 🎯 **Take Profit ({tp_target_name}):** `{tp_disp}` (`+{tp_pct}%`)\n"
-                    f"└ ⚖️ **R:R Ratio (Net):** `1 : {rr_ratio}`\n\n"
+                    f"├ 🎯 **Take Profit ({tp_target_name}):** Dynamic `{tp_disp}` (`+{tp_pct}%`)\n"
+                    f"├ ⚖️ **R:R Ratio (Net):** `1 : {rr_ratio}`\n"
+                    f"└ 👉 **ACTION:** Exit at PHYSICAL TOUCH of {tp_target_name} on 4H (levels follow price)\n\n"
                     f"📈 **Market Confirmations:**{conf_msg}\n\n"
                     f"👁 [View Chart on TradingView]({tv_link})"
                 )
