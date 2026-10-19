@@ -290,7 +290,7 @@ def eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_
 async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: dict, btc_dumping: bool = False, pre_fetched_df_4h=None):
     try:
         is_core = symbol in ['BTC/GBP', 'ETH/GBP']
-        crypto_icon = '🚀' # Ujednolicone na rakietkę dla wszystkich
+        crypto_icon = '🚀'
         
         pinbar_threshold = 0.50 if is_core else 0.60
         rsi_signal_threshold = 35.0 if is_core else 33.0
@@ -514,7 +514,6 @@ async def main():
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
     now_str = uk_now.strftime('%Y-%m-%d %H:%M')
-    github_event = os.getenv('GITHUB_EVENT_NAME', '')
 
     sheet = init_google_sheet()
     cache = load_cache()
@@ -589,22 +588,6 @@ async def main():
 
             write_github_step_summary(digest_summary_rows, health_msg=health_summary)
 
-            # Ręczny skan w 3 czystych paczkach po dokładnie 6 pozycji
-            if github_event == 'workflow_dispatch':
-                if digest_lines_p1:
-                    msg_p1 = "🎯 **MANUAL CRYPTO MARKET SCAN (1/3)**\n───────────────────\n\n" + ''.join(digest_lines_p1).strip()
-                    await send_telegram_alert_async(http_client, msg_p1)
-                    await asyncio.sleep(0.5)
-
-                if digest_lines_p2:
-                    msg_p2 = "🎯 **MANUAL CRYPTO MARKET SCAN (2/3)**\n───────────────────\n\n" + ''.join(digest_lines_p2).strip()
-                    await send_telegram_alert_async(http_client, msg_p2)
-                    await asyncio.sleep(0.5)
-
-                if digest_lines_p3:
-                    msg_p3 = "🎯 **MANUAL CRYPTO MARKET SCAN (3/3)**\n───────────────────\n\n" + ''.join(digest_lines_p3).strip()
-                    await send_telegram_alert_async(http_client, msg_p3)
-
             await process_telegram_commands_async(http_client, cache, digest_summary_rows)
 
             if pending_alerts:
@@ -626,23 +609,24 @@ async def main():
                 except Exception as e:
                     logging.error(f"Błąd zapisu w Google Sheets: {e}")
 
-            # Raport daily o 21:00 w 3 paczkach po 6 pozycji
-            if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
+            # Raport daily o 08:00 rano (Pancerna blokada przed duplikacją)
+            if uk_now.hour == 8 and cache.get('DIGEST_DATE') != today_str:
+                cache['DIGEST_DATE'] = today_str
+                save_cache(cache)
+
                 if digest_lines_p1:
-                    msg_p1 = "📋 **DAILY CRYPTO MARKET DIGEST (1/3)**\n───────────────────\n\n" + ''.join(digest_lines_p1).strip()
+                    msg_p1 = "🌅 **MORNING CRYPTO MARKET DIGEST (1/3)**\n───────────────────\n\n" + ''.join(digest_lines_p1).strip()
                     await send_telegram_alert_async(http_client, msg_p1)
                     await asyncio.sleep(0.5)
 
                 if digest_lines_p2:
-                    msg_p2 = "📋 **DAILY CRYPTO MARKET DIGEST (2/3)**\n───────────────────\n\n" + ''.join(digest_lines_p2).strip()
+                    msg_p2 = "🌅 **MORNING CRYPTO MARKET DIGEST (2/3)**\n───────────────────\n\n" + ''.join(digest_lines_p2).strip()
                     await send_telegram_alert_async(http_client, msg_p2)
                     await asyncio.sleep(0.5)
 
                 if digest_lines_p3:
-                    msg_p3 = "📋 **DAILY CRYPTO MARKET DIGEST (3/3)**\n───────────────────\n\n" + ''.join(digest_lines_p3).strip()
+                    msg_p3 = "🌅 **MORNING CRYPTO MARKET DIGEST (3/3)**\n───────────────────\n\n" + ''.join(digest_lines_p3).strip()
                     await send_telegram_alert_async(http_client, msg_p3)
-
-                cache['DIGEST_DATE'] = today_str
 
             save_cache(cache)
 
