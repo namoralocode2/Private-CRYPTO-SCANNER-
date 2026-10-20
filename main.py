@@ -609,25 +609,6 @@ async def main():
                 except Exception as e:
                     logging.error(f"Błąd zapisu w Google Sheets: {e}")
 
-            # Raport daily o 08:00 rano (Pancerna blokada przed duplikacją)
-            if uk_now.hour == 8 and cache.get('DIGEST_DATE') != today_str:
-                cache['DIGEST_DATE'] = today_str
-                save_cache(cache)
-
-                if digest_lines_p1:
-                    msg_p1 = "🌅 **MORNING CRYPTO MARKET DIGEST (1/3)**\n───────────────────\n\n" + ''.join(digest_lines_p1).strip()
-                    await send_telegram_alert_async(http_client, msg_p1)
-                    await asyncio.sleep(0.5)
-
-                if digest_lines_p2:
-                    msg_p2 = "🌅 **MORNING CRYPTO MARKET DIGEST (2/3)**\n───────────────────\n\n" + ''.join(digest_lines_p2).strip()
-                    await send_telegram_alert_async(http_client, msg_p2)
-                    await asyncio.sleep(0.5)
-
-                if digest_lines_p3:
-                    msg_p3 = "🌅 **MORNING CRYPTO MARKET DIGEST (3/3)**\n───────────────────\n\n" + ''.join(digest_lines_p3).strip()
-                    await send_telegram_alert_async(http_client, msg_p3)
-
             save_cache(cache)
 
         logging.info(f"Skaner krypto zakończył działanie w czasie: {elapsed}s.")
