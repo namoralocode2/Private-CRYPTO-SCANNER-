@@ -23,6 +23,13 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# V3.5 – clean fast live scanner (English alerts):
+# - Automatic per-signal history check REMOVED (too slow for GitHub Actions)
+# - All user-facing messages in English (ready for X)
+# - Safety filters kept (volume floor, pinbar logic, BTC dump, 1D, R:R)
+# - Optional /backtest Telegram command still available if you want it manually
+# - Goal: fast scans, no capital loss from weak signals
+
 # --- 2. ZMIENNE ŚRODOWISKOWE I STAŁE ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -102,6 +109,15 @@ async def send_telegram_alert_async(http_client: httpx.AsyncClient, msg: str, cu
     if not TELEGRAM_TOKEN or not chat_id:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
+    # Prosty escape dla Markdown (żeby dynamiczne teksty nie psuły parse)
+    def escape_md(text: str) -> str:
+        for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+            text = text.replace(ch, '\\' + ch)
+        return text
+    
+    # Uwaga: nie escapujemy całego msg, bo ma kontrolowane Markdown. 
+    # W przyszłości można escapować tylko dynamiczne części.
     payload = {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True}
     try:
         response = await http_client.post(url, json=payload, timeout=10.0)
@@ -117,14 +133,14 @@ def write_github_step_summary(digest_rows, health_msg=""):
                 if health_msg:
                     f.write(f"> {health_msg}\n\n")
                 f.write("### 📊 Podsumowanie Skanera Krypto (Tryb Pancerny)\n\n")
-                f.write("| Moneta | Cena | RSI 4H | Formacja | Stan |\n")
+                f.write("| Coin | Price | RSI 4H | Pattern | Status |\n")
                 f.write("| --- | --- | --- | --- | --- |\n")
                 for r in digest_rows:
                     f.write(f"| **{r['symbol']}** | {r['price']} | {r['rsi']} | {r['pinbar']} | {r['status']} |\n")
         except Exception:
             pass
 
-async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache: dict, digest_rows: list):
+async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache: dict, digest_rows: list, exchange=None):
     if not TELEGRAM_TOKEN:
         return
     last_offset = cache.get("telegram_update_offset", 0)
@@ -138,13 +154,12 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                 msg_obj = update.get("message") or update.get("edited_message") or {}
                 text = str(msg_obj.get("text", "")).strip().lower()
                 chat_id = msg_obj.get("chat", {}).get("id")
+                target_chat = chat_id or TELEGRAM_CHAT_ID
 
                 if text.startswith(("/status", "/stan", "/start")):
                     p1_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P1]
                     p2_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P2]
                     p3_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P3]
-
-                    target_chat = chat_id or TELEGRAM_CHAT_ID
 
                     if p1_rows:
                         status_msg_p1 = "🚀 **CRYPTO MARKET STATUS (1/3)**\n───────────────────\n\n"
@@ -183,6 +198,52 @@ async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache:
                                 f"└ Status: {r['status']}\n\n"
                             )
                         await send_telegram_alert_async(http_client, status_msg_p3.strip(), custom_chat_id=target_chat)
+
+                # Komenda /backtest lub /bt – odpala backtest na żądanie i wysyła podsumowanie
+                elif text.startswith(("/backtest", "/bt")) and exchange is not None:
+                    await send_telegram_alert_async(
+                        http_client,
+                        "⏳ **Backtest started...** (this may take a moment)\nChecking historical signal performance.",
+                        custom_chat_id=target_chat
+                    )
+                    try:
+                        # Odpalamy backtest (używa istniejącej funkcji)
+                        results = []
+                        for symbol in SYMBOLS[:6]:  # ograniczamy do pierwszych 6 dla szybkości, resztę można rozszerzyć
+                            res = await run_simple_backtest(exchange, symbol, lookback_candles=300)
+                            if res and res['trades'] > 0:
+                                results.append(res)
+                            await asyncio.sleep(0.8)
+
+                        if results:
+                            total_trades = sum(r['trades'] for r in results)
+                            total_wins = sum(r['wins'] for r in results)
+                            overall_wr = round(total_wins / total_trades * 100, 1) if total_trades else 0
+                            overall_net = sum(r['total_net'] for r in results)
+                            summary = (
+                                f"📊 **Backtest Summary (4H)**\n"
+                                f"───────────────────\n"
+                                f"Symbols checked: `{len(results)}`\n"
+                                f"Total trades: `{total_trades}`\n"
+                                f"Overall WR: `{overall_wr}%`\n"
+                                f"Sum net %: `{round(overall_net, 2)}%`\n\n"
+                                f"_Uwaga: przybliżenie, bez pełnego BTC guard / slippage._"
+                            )
+                            await send_telegram_alert_async(http_client, summary, custom_chat_id=target_chat)
+                        else:
+                            await send_telegram_alert_async(
+                                http_client,
+                                "ℹ️ Backtest zakończony – brak transakcji w badanym okresie.",
+                                custom_chat_id=target_chat
+                            )
+                    except Exception as bt_e:
+                        logging.error(f"Błąd backtestu z Telegram: {bt_e}")
+                        await send_telegram_alert_async(
+                            http_client,
+                            f"❌ Backtest error:\n`{str(bt_e)[:200]}`",
+                            custom_chat_id=target_chat
+                        )
+
     except Exception as e:
         logging.error(f"Błąd Telegram Commands: {e}")
 
@@ -258,33 +319,113 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
 
 
 def eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_ratio):
-    """RYGORSTYCZNA weryfikacja sygnału z filtrem świec zielonych."""
-    if vol_ratio < 110:
+    """Kontrolowana weryfikacja sygnału. Volume floor obniżony do 95, ale słabe volume wymaga mocniejszych potwierdzeń."""
+    # Absolutny floor – poniżej tego prawie nigdy nie wchodzimy
+    if vol_ratio < 95:
         return 'NONE'
 
     rsi_val = float(row['rsi'])
     is_pinbar = bool(row['pinbar'])
     bb_touched = float(row['low']) <= float(row['bb_lower'])
-    
     is_green = float(row['close']) > float(row['open'])
-    
+    strong_volume = vol_ratio >= 140
+    decent_volume = vol_ratio >= 110
+
     if not is_above_sma200:
-        if is_pinbar and rsi_val <= 30.0 and is_green:
+        # Poniżej SMA – bardzo restrykcyjnie
+        if is_pinbar and rsi_val <= 30.0 and (is_green or strong_volume):
             return 'BUY_PINBAR'
-        if rsi_val <= 25.0 and is_green and vol_ratio >= 150:
+        if rsi_val <= 25.0 and is_green and strong_volume:
             return 'BUY_REBOUND'
         return 'NONE'
 
-    if is_pinbar and rsi_val <= max_pinbar_rsi:
+    # Powyżej SMA – trochę bardziej elastycznie
+    if is_pinbar and rsi_val <= max_pinbar_rsi and (is_green or decent_volume):
         return 'BUY_PINBAR'
     
-    if rsi_val <= rsi_signal_threshold and (is_green or vol_ratio >= 150):
+    if rsi_val <= rsi_signal_threshold and (is_green or strong_volume):
         return 'BUY_REBOUND'
         
-    if bb_touched and rsi_val <= 35.0 and is_green:
+    if bb_touched and rsi_val <= 35.0 and is_green and decent_volume:
         return 'BUY_BOUNCE'
         
     return 'NONE'
+
+
+def get_recent_setup_performance(df, is_core: bool, lookback: int = 120):
+    """Szybki automatyczny check historii na już pobranych danych.
+    Zwraca słownik z WR i średnim net % ostatnich podobnych sygnałów.
+    Używane do wzbogacenia alertu – nie blokuje skanu."""
+    if df is None or len(df) < 60:
+        return None
+
+    pinbar_threshold = 0.50 if is_core else 0.60
+    rsi_signal_threshold = 35.0 if is_core else 33.0
+    max_pinbar_rsi = 40.0 if is_core else 36.0
+
+    # Używamy już policzonych wskaźników
+    trades = []
+    start_idx = max(50, len(df) - lookback)
+
+    for i in range(start_idx, len(df) - 2):
+        row = df.iloc[i]
+        if pd.isna(row.get('rsi')) or pd.isna(row.get('vol_sma20')):
+            continue
+
+        vol_ratio = 100
+        if float(row['vol_sma20']) > 0:
+            vol_ratio = int((float(row['volume']) / float(row['vol_sma20'])) * 100)
+
+        sma200 = row.get('sma200')
+        is_above = True if pd.isna(sma200) else float(row['close']) >= float(sma200)
+
+        sig = eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above, vol_ratio)
+        if sig == 'NONE':
+            continue
+
+        # Symulacja wyniku na kolejnych świecach (prosty SL/TP)
+        entry = float(row['close'])
+        low = float(row['low'])
+        atr = float(row['atr']) if pd.notna(row.get('atr')) else entry * 0.01
+        soft_sl = max(0.000001, low - 1.5 * atr)
+        sma20 = float(row['sma20']) if pd.notna(row.get('sma20')) else entry
+        bb_upper = float(row['bb_upper']) if pd.notna(row.get('bb_upper')) else entry * 1.02
+        tp = sma20 if entry < sma20 else bb_upper
+
+        risk = entry - soft_sl
+        reward = tp - entry
+        if risk <= 0 or (reward / risk) < 1.2:
+            continue
+
+        # Sprawdź następne 1-6 świec czy SL/TP trafione
+        hit = None
+        for j in range(1, 7):
+            if i + j >= len(df):
+                break
+            next_high = float(df.iloc[i + j]['high'])
+            next_low = float(df.iloc[i + j]['low'])
+            if next_low <= soft_sl:
+                hit = 'sl'
+                break
+            if next_high >= tp:
+                hit = 'tp'
+                break
+
+        if hit:
+            pnl = ((soft_sl if hit == 'sl' else tp) - entry) / entry * 100
+            net = pnl - 0.6
+            trades.append(net > 0)
+
+    if not trades:
+        return None
+
+    wins = sum(trades)
+    wr = round(wins / len(trades) * 100, 1)
+    return {
+        'count': len(trades),
+        'winrate': wr,
+        'note': f"Ostatnie {len(trades)} setupów: {wr}% WR"
+    }
 
 
 async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: dict, btc_dumping: bool = False, pre_fetched_df_4h=None):
@@ -392,9 +533,15 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
         raw_signal = eval_signal(last_row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_ratio)
 
         blocked_by_guard = False
+        block_reason = ""
         if raw_signal != 'NONE':
-            if (btc_dumping and not is_core) or not is_1d_safe:
+            if btc_dumping and not is_core:
                 blocked_by_guard = True
+                block_reason = "BTC Dump"
+                current_signal_type = 'NONE'
+            elif not is_1d_safe:
+                blocked_by_guard = True
+                block_reason = "1D Unsafe (RSI+SMA)"
                 current_signal_type = 'NONE'
             else:
                 current_signal_type = raw_signal
@@ -402,12 +549,14 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
             current_signal_type = 'NONE'
 
         status_map = {
-            'NONE': '🛡 Blocked (Downside Risk)' if blocked_by_guard else '⚪ Neutral',
+            'NONE': f'🛡 Blocked ({block_reason})' if blocked_by_guard else '⚪ Neutral',
             'BUY_REBOUND': '⚡️ QUICK REBOUND (Demand)',
             'BUY_PINBAR': '🕯️ PINBAR REBOUND',
             'BUY_BOUNCE': '🟡 BOUNCE ZONE'
         }
         status_txt = status_map.get(current_signal_type, '⚪ Neutral')
+        if blocked_by_guard:
+            logging.info(f"Signal blocked for {symbol_display}: {block_reason} (raw was {raw_signal})")
         pinbar_txt = f"{int(pinbar_threshold * 100)}%" if is_pinbar else "None"
 
         tv_link_symbol = f"[{symbol_display}](https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol})"
@@ -506,10 +655,145 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
         return None
 
 
+# --- 6. BACKTEST (opcjonalny, włączany zmienną RUN_BACKTEST=1) ---
+async def run_simple_backtest(exchange, symbol: str, timeframe='4h', lookback_candles=400):
+    """Prosty walk-forward backtest na historii.
+    Uwaga: to przybliżenie. Nie symuluje pełnego BTC dump guard w czasie,
+    nie ma slippage, fees są tylko częściowo uwzględnione w R:R.
+    Używaj do oceny jakości sygnałów, nie jako gwarancji zysku."""
+    logging.info(f"Backtest {symbol} ({timeframe}, {lookback_candles} świec)...")
+    
+    df = await fetch_ohlcv_async(exchange, symbol, timeframe=timeframe, limit=lookback_candles)
+    if df is None or len(df) < 100:
+        logging.warning(f"Za mało danych dla {symbol}")
+        return None
+
+    is_core = symbol in ['BTC/GBP', 'ETH/GBP']
+    pinbar_threshold = 0.50 if is_core else 0.60
+    rsi_signal_threshold = 35.0 if is_core else 33.0
+    max_pinbar_rsi = 40.0 if is_core else 36.0
+
+    df = calculate_indicators(df, min_wick_ratio=pinbar_threshold)
+
+    trades = []
+    in_position = False
+    entry_price = 0.0
+    entry_idx = 0
+    signal_type = None
+    soft_sl = 0.0
+    tp = 0.0
+
+    for i in range(50, len(df) - 1):
+        row = df.iloc[i]
+        # Symulujemy, że patrzymy na zamkniętą świecę i
+        if in_position:
+            # Sprawdź czy SL lub TP został trafiony na następnej świecy (uproszczenie)
+            next_high = float(df.iloc[i+1]['high'])
+            next_low = float(df.iloc[i+1]['low'])
+            next_close = float(df.iloc[i+1]['close'])
+
+            hit_sl = next_low <= soft_sl
+            hit_tp = next_high >= tp
+
+            if hit_sl or hit_tp:
+                exit_price = soft_sl if hit_sl else tp
+                pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                # Net after ~0.6% round-trip fee estimate
+                net_pnl = pnl_pct - 0.6
+                trades.append({
+                    'signal': signal_type,
+                    'entry': entry_price,
+                    'exit': exit_price,
+                    'pnl_pct': round(pnl_pct, 2),
+                    'net_pnl': round(net_pnl, 2),
+                    'win': net_pnl > 0,
+                    'bars_held': i - entry_idx
+                })
+                in_position = False
+                continue
+
+        # Nowa pozycja tylko jeśli nie jesteśmy w jednej
+        if not in_position:
+            vol_ratio = 100
+            if pd.notna(row['vol_sma20']) and float(row['vol_sma20']) > 0:
+                vol_ratio = int((float(row['volume']) / float(row['vol_sma20'])) * 100)
+
+            sma200 = row['sma200']
+            is_above = True if pd.isna(sma200) else float(row['close']) >= float(sma200)
+
+            sig = eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above, vol_ratio)
+            if sig != 'NONE':
+                # Wejście na close tej świecy
+                entry_price = float(row['close'])
+                low = float(row['low'])
+                atr = float(row['atr']) if pd.notna(row['atr']) else entry_price * 0.01
+                soft_sl = max(0.000001, low - 1.5 * atr)
+                sma20 = float(row['sma20']) if pd.notna(row['sma20']) else entry_price
+                bb_upper = float(row['bb_upper']) if pd.notna(row['bb_upper']) else entry_price * 1.02
+                tp = sma20 if entry_price < sma20 else bb_upper
+
+                # Minimalne R:R
+                risk = entry_price - soft_sl
+                reward = tp - entry_price
+                if risk > 0 and (reward / risk) >= 1.2:
+                    in_position = True
+                    entry_idx = i
+                    signal_type = sig
+
+    if not trades:
+        logging.info(f"{symbol}: brak transakcji w backteście")
+        return {'symbol': symbol, 'trades': 0, 'wins': 0, 'winrate': 0, 'avg_net': 0, 'total_net': 0}
+
+    wins = sum(1 for t in trades if t['win'])
+    total_net = sum(t['net_pnl'] for t in trades)
+    avg_net = total_net / len(trades)
+
+    result = {
+        'symbol': symbol,
+        'trades': len(trades),
+        'wins': wins,
+        'winrate': round(wins / len(trades) * 100, 1),
+        'avg_net': round(avg_net, 2),
+        'total_net': round(total_net, 2),
+        'details': trades[-5:]  # ostatnie 5 dla podglądu
+    }
+    logging.info(f"{symbol}: {result['trades']} trades | WR {result['winrate']}% | Avg net {result['avg_net']}% | Total {result['total_net']}%")
+    return result
+
+
+async def run_full_backtest():
+    """Uruchamia backtest na wszystkich symbolach (tylko gdy RUN_BACKTEST=1)."""
+    logging.info("=== START BACKTEST MODE ===")
+    exchange = ccxt.kraken({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+    results = []
+    try:
+        for symbol in SYMBOLS:
+            res = await run_simple_backtest(exchange, symbol)
+            if res:
+                results.append(res)
+            await asyncio.sleep(1.2)  # rate limit
+    finally:
+        await exchange.close()
+
+    # Podsumowanie
+    if results:
+        total_trades = sum(r['trades'] for r in results)
+        total_wins = sum(r['wins'] for r in results)
+        overall_wr = round(total_wins / total_trades * 100, 1) if total_trades else 0
+        overall_net = sum(r['total_net'] for r in results)
+        logging.info(f"=== BACKTEST SUMMARY ===")
+        logging.info(f"Symbols: {len(results)} | Trades: {total_trades} | Overall WR: {overall_wr}% | Sum net %: {round(overall_net, 2)}")
+        # Zapisz do pliku
+        with open('/workspace/artifacts/backtest_results.json', 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+        logging.info("Wyniki zapisane do backtest_results.json")
+    logging.info("=== BACKTEST ZAKOŃCZONY ===")
+
+
 # --- 5. GŁÓWNA PĘTLA APLIKACJI ---
 async def main():
     start_time = time.time()
-    logging.info("Uruchamianie Skanera Krypto V3.0 (Tryb Pancerny Ochrony Kapitału)...")
+    logging.info("Starting Crypto Scanner V3.5 (Fast Live Mode + English alerts)...")
 
     uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
     today_str = uk_now.strftime('%Y-%m-%d')
@@ -588,7 +872,7 @@ async def main():
 
             write_github_step_summary(digest_summary_rows, health_msg=health_summary)
 
-            await process_telegram_commands_async(http_client, cache, digest_summary_rows)
+            await process_telegram_commands_async(http_client, cache, digest_summary_rows, exchange=exchange)
 
             if pending_alerts:
                 for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
@@ -619,7 +903,11 @@ async def main():
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        if os.getenv('RUN_BACKTEST', '').strip() == '1':
+            logging.info("Tryb BACKTEST włączony (RUN_BACKTEST=1). Normalny skan pominięty.")
+            asyncio.run(run_full_backtest())
+        else:
+            asyncio.run(main())
     except Exception as e:
         clean_err = str(e).replace('_', '\\_').replace('*', '\\*')
         logging.critical(f"🚨 KRYTYCZNY BŁĄD SKANERA KRYPTO: {e}", exc_info=True)
