@@ -5,3 +5,4 @@ gspread
 google-auth
 ta
 requests
+pytz
