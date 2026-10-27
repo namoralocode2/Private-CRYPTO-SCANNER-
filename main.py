@@ -1,69 +1,47 @@
 # -*- coding: utf-8 -*-
-import asyncio
-import datetime
-import json
-import logging
-import os
-import re
-import tempfile
-import time
-import html
-from zoneinfo import ZoneInfo
+"""
+Automated Crypto Market Scanner (Commercial Edition V3.0 - Morning Digest & Active BTC Guard)
+--------------------------------------------------------------------------------
+Scans 24 top crypto assets on Kraken in USD ($), analyzing 4H RSI (14), 
+1D RSI, 1D 200 SMA trend alignment, and 4H Demand Pinbars. 
+Includes Active BTC Guard to block altcoin trades during market crashes.
+Sends a single morning digest daily at 08:00 UK time.
+"""
 
+import os
+import sys
+import asyncio
+import aiohttp
+import logging
 import ccxt.async_support as ccxt
-import gspread
-import httpx
 import pandas as pd
 import numpy as np
-from google.oauth2.service_account import Credentials
+from datetime import datetime, timezone
+import json
+import pytz
 
-# --- 1. KONFIGURACJA LOGOWANIA ---
+# Setup Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# --- 2. ZMIENNE ŚRODOWISKOWE I STAŁE ---
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN')
+# Secrets & Environment Configuration
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
-GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS') or os.getenv('GOOGLE_TASKS_CREDENTIALS')
+USER_TZ = os.getenv('TIMEZONE', 'Europe/London')
+EXCHANGE_NAME = os.getenv('EXCHANGE', 'kraken').lower()
 
-CRYPTO_P1 = ['BTC/GBP', 'ETH/GBP', 'SOL/GBP', 'TAO/USD', 'RENDER/USD', 'ONDO/USD']
-CRYPTO_P2 = ['XRP/GBP', 'LINK/GBP', 'SUI/GBP', 'AAVE/GBP', 'FET/USD', 'NEAR/USD']
-CRYPTO_P3 = ['HNT/USD', 'ARB/USD', 'AVAX/USD', 'APT/USD', 'INJ/USD', 'TIA/USD']
+# Active Kraken USD Pairs (Guaranteed 4 packs x 6 pairs = 24 total)
+CRYPTO_P1 = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'XRP/USD', 'AVAX/USD', 'DOT/USD']
+CRYPTO_P2 = ['LINK/USD', 'ADA/USD', 'SUI/USD', 'NEAR/USD', 'APT/USD', 'TIA/USD']
+CRYPTO_P3 = ['RENDER/USD', 'FET/USD', 'UNI/USD', 'OP/USD', 'ARB/USD', 'ATOM/USD']
+CRYPTO_P4 = ['SEI/USD', 'INJ/USD', 'LTC/USD', 'BCH/USD', 'FIL/USD', 'XLM/USD']
 
-SYMBOLS = CRYPTO_P1 + CRYPTO_P2 + CRYPTO_P3
-CACHE_FILE = 'cache_krypto.json'
+PAIRS = CRYPTO_P1 + CRYPTO_P2 + CRYPTO_P3 + CRYPTO_P4
 
-
-# --- 3. INICJALIZACJA USŁUG I I/O ---
-def init_google_sheet():
-    if not GOOGLE_CREDENTIALS or not SPREADSHEET_ID:
-        logging.info("Brak GOOGLE_CREDENTIALS lub SPREADSHEET_ID. Pomijam Google Sheets.")
-        return None
-    try:
-        raw_id = SPREADSHEET_ID
-        if "/d/" in raw_id:
-            raw_id = raw_id.split("/d/")[1].split("/")[0]
-            
-        clean_sheet_id = re.sub(r'[^a-zA-Z0-9-_]', '', raw_id)
-        creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        if "private_key" in creds_dict and isinstance(creds_dict["private_key"], str):
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        sheet_client = gspread.authorize(creds)
-        sheet = sheet_client.open_by_key(clean_sheet_id).worksheet("Krypto")
-        return sheet
-    except Exception as e:
-        logging.error(f"Błąd inicjalizacji Google Sheets: {e}")
-        return None
+CACHE_FILE = 'crypto_cache.json'
 
 def load_cache():
     if os.path.exists(CACHE_FILE):
@@ -71,124 +49,78 @@ def load_cache():
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception:
-            pass
+            return {}
     return {}
 
-def save_cache(cache_data):
+def save_cache(cache):
     try:
-        now_ts = int(time.time())
-        retention_period = 14 * 86400
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        retention_period = 14 * 86400  # 14 days
+
         cleaned_cache = {}
-        for k, v in cache_data.items():
+        for k, v in cache.items():
             if k.startswith("ALERT_"):
                 parts = k.split("_")
                 ts = next((int(p) for p in parts if p.isdigit() and len(p) >= 10), None)
-                if ts and (now_ts - ts > retention_period):
-                    continue
+                if ts:
+                    ts_sec = ts // 1000 if ts > 10000000000 else ts
+                    if (now_ts - ts_sec) > retention_period:
+                        continue
             cleaned_cache[k] = v
 
-        dir_name = os.path.dirname(os.path.abspath(CACHE_FILE)) or "."
-        with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, encoding="utf-8") as tf:
-            json.dump(cleaned_cache, tf, indent=2, ensure_ascii=False)
-            temp_name = tf.name
-        os.replace(temp_name, CACHE_FILE)
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cleaned_cache, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        logging.error(f"Nie udało się zapisać cache: {e}")
+        logging.error(f"Error saving cache: {e}")
 
-async def send_telegram_alert_async(http_client: httpx.AsyncClient, msg: str, custom_chat_id=None):
-    chat_id = custom_chat_id or TELEGRAM_CHAT_ID
-    if not TELEGRAM_TOKEN or not chat_id:
+async def send_telegram_alert_async(session, text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("Missing Telegram bot token or Chat ID.")
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": chat_id, 
-        "text": msg, 
-        "parse_mode": "HTML", 
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    headers = {"Content-Type": "application/json; charset=utf-8"}
     try:
-        response = await http_client.post(url, json=payload, headers=headers, timeout=10.0)
-        if response.status_code != 200:
-            logging.error(f"Błąd API Telegrama ({response.status_code}): {response.text}")
+        async with session.post(url, json=payload, timeout=10.0) as response:
+            if response.status != 200:
+                logging.error(f"Telegram API Error: status {response.status}")
     except Exception as e:
-        logging.error(f"Błąd wysyłki Telegram: {e}")
+        logging.error(f"Error sending message to Telegram: {e}")
 
-def write_github_step_summary(digest_rows, health_msg=""):
-    summary_file = os.getenv("GITHUB_STEP_SUMMARY")
-    if summary_file:
-        try:
-            with open(summary_file, "a", encoding="utf-8") as f:
-                if health_msg:
-                    f.write(f"> {health_msg}\n\n")
-                f.write("### 📊 Podsumowanie Skanera Krypto\n\n")
-                f.write("| Coin | Price | RSI 4H | Pattern | Status |\n")
-                f.write("| --- | --- | --- | --- | --- |\n")
-                for r in digest_rows:
-                    f.write(f"| **{r['symbol']}** | {r['price']} | {r['rsi']} | {r['pinbar']} | {r['status']} |\n")
-        except Exception:
-            pass
+    await asyncio.sleep(0.1)
 
-async def process_telegram_commands_async(http_client: httpx.AsyncClient, cache: dict, digest_rows: list, exchange=None):
-    if not TELEGRAM_TOKEN:
+async def send_chunked_digest(session, title, digest_results):
+    if not digest_results:
         return
-    last_offset = cache.get("telegram_update_offset", 0)
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_offset + 1}&timeout=2"
-    try:
-        resp = await http_client.get(url, timeout=5.0)
-        if resp.status_code == 200:
-            data = resp.json()
-            for update in data.get("result", []):
-                cache["telegram_update_offset"] = update["update_id"]
-                msg_obj = update.get("message") or update.get("edited_message") or {}
-                text = str(msg_obj.get("text", "")).strip().lower()
-                chat_id = msg_obj.get("chat", {}).get("id")
-                target_chat = chat_id or TELEGRAM_CHAT_ID
+    
+    res_dict = {sym: item for item, sym in digest_results if item is not None}
+    
+    packs = [
+        (CRYPTO_P1, "1/4"),
+        (CRYPTO_P2, "2/4"),
+        (CRYPTO_P3, "3/4"),
+        (CRYPTO_P4, "4/4")
+    ]
+    
+    for pack_symbols, pack_label in packs:
+        lines = []
+        for sym in pack_symbols:
+            if sym in res_dict:
+                lines.append(res_dict[sym])
+            else:
+                logging.warning(f"Missing data for symbol {sym} in Digest.")
+        
+        if len(lines) > 0:
+            msg_text = f"{title} ({pack_label})\n───────────────────\n\n" + "\n\n".join(lines)
+            await send_telegram_alert_async(session, msg_text.strip())
+            await asyncio.sleep(0.5)
 
-                if text.startswith(("/status", "/stan", "/start")):
-                    p1_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P1]
-                    p2_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P2]
-                    p3_rows = [r for r in digest_rows if r['raw_symbol'] in CRYPTO_P3]
-
-                    for idx, p_rows in enumerate([p1_rows, p2_rows, p3_rows], 1):
-                        if p_rows:
-                            status_msg = f"🚀 <b>CRYPTO MARKET STATUS ({idx}/3)</b>\n───────────────────\n\n"
-                            for r in p_rows:
-                                status_msg += (
-                                    f"📈 <b>{r['symbol']}</b> • {r['price']}\n"
-                                    f" ├ RSI (4H): {r['rsi']} | {r.get('sma200', 'No SMA 200')}\n"
-                                    f" ├ Pinbar: {r['pinbar']}\n"
-                                    f" └ Status: {r['status']}\n\n"
-                                )
-                            await send_telegram_alert_async(http_client, status_msg.strip(), custom_chat_id=target_chat)
-                            await asyncio.sleep(0.5)
-
-    except Exception as e:
-        logging.error(f"Błąd Telegram Commands: {e}")
-
-
-# --- 4. ANALIZA TECHNICZNA I DANE ---
-async def fetch_ohlcv_async(exchange_inst, symbol, timeframe='4h', limit=250):
-    try:
-        ohlcv = await exchange_inst.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        return df
-    except Exception as e:
-        logging.warning(f"Błąd pobierania {symbol} ({timeframe}): {e}")
-        return None
-
-async def get_gbp_rate_async(exchange_inst):
-    try:
-        ticker = await exchange_inst.fetch_ticker('GBP/USD')
-        gbp_usd = float(ticker['last'])
-        if gbp_usd > 0:
-            return 1.0 / gbp_usd
-    except Exception:
-        pass
-    return 0.79
-
-def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
-    delta = df['close'].diff()
+def calculate_indicators(df_4h, min_wick_ratio=0.55):
+    delta = df_4h['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
     
@@ -196,155 +128,159 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     avg_loss = loss.ewm(alpha=1/14, adjust=False).mean().replace(0, 1e-10)
     
     rs = avg_gain / avg_loss
-    df['rsi'] = round(100 - (100 / (1 + rs)), 2)
+    df_4h['rsi'] = round(100 - (100 / (1 + rs)), 2)
     
     stoch_period = 14
-    rsi_min = df['rsi'].rolling(window=stoch_period).min()
-    rsi_max = df['rsi'].rolling(window=stoch_period).max()
-    stoch_rsi = (df['rsi'] - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
-    df['stoch_k'] = round(stoch_rsi.rolling(window=3).mean(), 2)
-    df['stoch_d'] = round(df['stoch_k'].rolling(window=3).mean(), 2)
+    rsi_min = df_4h['rsi'].rolling(window=stoch_period).min()
+    rsi_max = df_4h['rsi'].rolling(window=stoch_period).max()
+    stoch_rsi = (df_4h['rsi'] - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
+    df_4h['stoch_k'] = round(stoch_rsi.rolling(window=3).mean(), 2)
+    df_4h['stoch_d'] = round(df_4h['stoch_k'].rolling(window=3).mean(), 2)
     
-    df['sma20'] = df['close'].rolling(window=20).mean()
-    df['sma50'] = df['close'].rolling(window=50).mean()
-    df['sma200'] = df['close'].rolling(window=200).mean()
-    df['std20'] = df['close'].rolling(window=20).std()
-    df['bb_upper'] = df['sma20'] + (df['std20'] * 2)
-    df['bb_lower'] = df['sma20'] - (df['std20'] * 2)
+    df_4h['sma20'] = df_4h['close'].rolling(window=20).mean()
+    df_4h['sma50'] = df_4h['close'].rolling(window=50).mean()
+    df_4h['std20'] = df_4h['close'].rolling(window=20).std()
+    df_4h['bb_upper'] = df_4h['sma20'] + (df_4h['std20'] * 2)
+    df_4h['bb_lower'] = df_4h['sma20'] - (df_4h['std20'] * 2)
 
-    df['vol_sma20'] = df['volume'].rolling(window=20).mean()
+    df_4h['vol_sma20'] = df_4h['volume'].rolling(window=20).mean()
     
-    tr1 = df['high'] - df['low']
-    tr2 = abs(df['high'] - df['close'].shift(1))
-    tr3 = abs(df['low'] - df['close'].shift(1))
-    df['tr'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df['atr'] = df['tr'].rolling(window=14).mean()
-
-    range_candle = df['high'] - df['low']
-    body = abs(df['close'] - df['open'])
-    lower_wick = df[['open', 'close']].min(axis=1) - df['low']
-    upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
+    range_candle = df_4h['high'] - df_4h['low']
+    body = abs(df_4h['close'] - df_4h['open'])
+    lower_wick = df_4h[['open', 'close']].min(axis=1) - df_4h['low']
+    upper_wick = df_4h['high'] - df_4h[['open', 'close']].max(axis=1)
     
     valid_range = range_candle > 0
     safe_range = range_candle.replace(0, np.nan)
     
     has_strong_lower_wick = (lower_wick / safe_range) >= min_wick_ratio
-    has_small_upper_wick = (upper_wick / safe_range) <= max_upper_wick_ratio
+    has_small_upper_wick = (upper_wick / safe_range) <= 0.25
     has_small_body = (body / safe_range) <= 0.35
     
-    df['pinbar'] = valid_range & has_strong_lower_wick.fillna(False) & has_small_upper_wick.fillna(False) & has_small_body.fillna(False)
-    return df
+    df_4h['pinbar'] = valid_range & has_strong_lower_wick.fillna(False) & has_small_upper_wick.fillna(False) & has_small_body.fillna(False)
+    return df_4h
 
-def eval_signal(row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_ratio):
-    if vol_ratio < 95:
-        return 'NONE'
-    rsi_val = float(row['rsi'])
-    is_pinbar = bool(row['pinbar'])
-    bb_touched = float(row['low']) <= float(row['bb_lower'])
-    is_green = float(row['close']) > float(row['open'])
-    strong_volume = vol_ratio >= 140
-    decent_volume = vol_ratio >= 110
-
-    if not is_above_sma200:
-        if is_pinbar and rsi_val <= 30.0 and (is_green or strong_volume):
-            return 'BUY_PINBAR'
-        if rsi_val <= 25.0 and is_green and strong_volume:
-            return 'BUY_REBOUND'
-        return 'NONE'
-
-    if is_pinbar and rsi_val <= max_pinbar_rsi and (is_green or decent_volume):
-        return 'BUY_PINBAR'
-    if rsi_val <= rsi_signal_threshold and (is_green or strong_volume):
-        return 'BUY_REBOUND'
-    if bb_touched and rsi_val <= 35.0 and is_green and decent_volume:
-        return 'BUY_BOUNCE'
-        
-    return 'NONE'
-
-async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: dict, btc_dumping: bool = False, pre_fetched_df_4h=None):
+async def analyze_crypto(exchange, symbol, session, cache, local_now, now_ts, today_str, github_event, btc_dump):
     try:
-        is_core = symbol in ['BTC/GBP', 'ETH/GBP']
-        pinbar_threshold = 0.50 if is_core else 0.60
-        rsi_signal_threshold = 35.0 if is_core else 33.0
-        max_pinbar_rsi = 40.0 if is_core else 36.0
+        f_4h = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
+        f_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=300)
+        ohlcv_4h, ohlcv_1d = await asyncio.gather(f_4h, f_1d)
         
-        if pre_fetched_df_4h is not None:
-            df = pre_fetched_df_4h
-            df_1d = await fetch_ohlcv_async(exchange_inst, symbol, timeframe='1d', limit=30)
-        else:
-            t_4h = fetch_ohlcv_async(exchange_inst, symbol, timeframe='4h')
-            t_1d = fetch_ohlcv_async(exchange_inst, symbol, timeframe='1d', limit=30)
-            df, df_1d = await asyncio.gather(t_4h, t_1d)
+        if not ohlcv_4h or not ohlcv_1d or len(ohlcv_4h) < 25 or len(ohlcv_1d) < 50:
+            logging.error(f"Incomplete OHLCV data for {symbol}")
+            return None, None, None
 
-        if df is None or len(df) < 50:
-            return None
+        df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
-        df = calculate_indicators(df, min_wick_ratio=pinbar_threshold, max_upper_wick_ratio=0.20)
+        df_4h = calculate_indicators(df_4h)
+        df_1d['SMA200'] = df_1d['close'].rolling(200).mean()
+        df_1d['SMA50'] = df_1d['close'].rolling(50).mean()
 
-        last_row = df.iloc[-2]
-        prev_row = df.iloc[-3]
+        rsi_1d_val = "N/A"
+        if len(df_1d) >= 15:
+            delta_1d = df_1d['close'].diff()
+            gain_1d = delta_1d.where(delta_1d > 0, 0)
+            loss_1d = -delta_1d.where(delta_1d < 0, 0)
+            avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False).mean()
+            avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False).mean().replace(0, 1e-10)
+            rs_1d = avg_gain_1d / avg_loss_1d
+            df_1d['rsi_1d'] = round(100 - (100 / (1 + rs_1d)), 2)
+            rsi_1d_val = float(df_1d['rsi_1d'].iloc[-1])
 
-        price_native = float(last_row['close'])
-        signal_low_native = float(last_row['low'])
-        sma20_native = float(last_row['sma20'])
-        bb_upper_native = float(last_row['bb_upper'])
-        atr_native = float(last_row['atr']) if pd.notna(last_row['atr']) else (signal_low_native * 0.01)
+        closed_row = df_4h.iloc[-2]
+        prev_closed_row = df_4h.iloc[-3]
+        closed_1d = df_1d.iloc[-2]
         
-        rsi_4h = float(last_row['rsi'])
-        sma200_val = last_row['sma200']
-        sma50_val = last_row['sma50']
-        
+        candle_ts = int(closed_row['timestamp'])
+
+        price = float(closed_row['close'])
+        signal_low = float(closed_row['low'])
+        sma20_val = float(closed_row['sma20'])
+        bb_upper_val = float(closed_row['bb_upper'])
+        rsi_4h = float(closed_row['rsi'])
+        prev_rsi_4h = float(prev_closed_row['rsi'])
+
+        sma200_val = closed_1d['SMA200']
+        sma50_val = closed_1d['SMA50']
+
         if pd.notna(sma200_val):
-            is_above_sma200 = (price_native >= float(sma200_val))
-            sma200_txt = "Above 200 SMA" if is_above_sma200 else "Below 200 SMA"
+            is_above_sma200 = (price >= float(sma200_val))
+            trend_1d_status = "Above 200 SMA" if is_above_sma200 else "Below 200 SMA"
         elif pd.notna(sma50_val):
-            is_above_sma200 = (price_native >= float(sma50_val))
-            sma200_txt = "Above 50 SMA (New)" if is_above_sma200 else "Below 50 SMA (New)"
+            is_above_sma200 = (price >= float(sma50_val))
+            trend_1d_status = "Above 50 SMA (New)" if is_above_sma200 else "Below 50 SMA (New)"
         else:
             is_above_sma200 = True
-            sma200_txt = "No SMA (New)"
+            trend_1d_status = "No SMA (New)"
 
-        is_pinbar = bool(last_row['pinbar'])
-        ts_closed = int(last_row['timestamp'] / 1000)
+        stoch_k = float(closed_row['stoch_k'])
+        prev_stoch_k = float(prev_closed_row['stoch_k'])
+        stoch_turning_up = (prev_stoch_k <= 25.0 or stoch_k <= 25.0) and (stoch_k > prev_stoch_k)
 
-        def get_vol_ratio(r):
-            v_t = float(r['volume'])
-            v_s = float(r['vol_sma20']) if pd.notna(r['vol_sma20']) else 0.0
-            return int((v_t / v_s) * 100) if v_s > 0 else 100
+        is_pinbar = bool(closed_row['pinbar'])
 
-        vol_ratio = get_vol_ratio(last_row)
-        volume_str = f"{vol_ratio}% of avg {'🟢 (High)' if vol_ratio >= 120 else ('🔴 (Low)' if vol_ratio <= 80 else '🟡 (Standard)')}"
+        vol_target = float(closed_row['volume'])
+        vol_sma = float(closed_row['vol_sma20']) if pd.notna(closed_row['vol_sma20']) else 0.0
+        volume_str = "Standard"
+        vol_ratio = 100
+        if vol_sma > 0:
+            vol_ratio = int((vol_target / vol_sma) * 100)
+            vol_emoji = '🟢 (High)' if vol_ratio >= 120 else ('🔴 (Low)' if vol_ratio <= 80 else '🟡 (Standard)')
+            volume_str = f"{vol_ratio}% of avg {vol_emoji}"
 
-        tv_clean_symbol = symbol.replace("/", "")
-        fx_ratio = usd_to_gbp if 'USD' in symbol else 1.0
-        symbol_display = symbol.replace('USD', 'GBP') if 'USD' in symbol else symbol
+        prev_vol_target = float(prev_closed_row['volume'])
+        prev_vol_sma = float(prev_closed_row['vol_sma20']) if pd.notna(prev_closed_row['vol_sma20']) else 0.0
+        prev_vol_ratio = int((prev_vol_target / prev_vol_sma) * 100) if prev_vol_sma > 0 else 100
 
-        price_gbp = price_native * fx_ratio
-        low_gbp = signal_low_native * fx_ratio
-        sma20_gbp = sma20_native * fx_ratio
-        bb_upper_gbp = bb_upper_native * fx_ratio
-        atr_gbp = atr_native * fx_ratio
+        price_str = f"${price:,.2f}" if price >= 1.0 else f"${price:,.4f}"
 
-        price_disp = f"£{price_gbp:,.2f}" if price_gbp >= 1.0 else f"£{price_gbp:,.4f}"
-        soft_sl_gbp = max(0.000001, low_gbp - (1.5 * atr_gbp))
-        hard_sl_gbp = max(0.000001, min(soft_sl_gbp * 0.98, low_gbp * 0.95))
-        tp_gbp = sma20_gbp if price_gbp < sma20_gbp else bb_upper_gbp
+        is_core = symbol in ['BTC/USD', 'ETH/USD']
+        if is_core:
+            rsi_signal_threshold = 38.0
+            max_pinbar_rsi = 42.0
+            bb_rebound_rsi_limit = 38.0
+            bounce_rsi_limit = 55.0
+        else:
+            rsi_signal_threshold = 32.0
+            max_pinbar_rsi = 38.0
+            bb_rebound_rsi_limit = 35.0
+            bounce_rsi_limit = 50.0
 
-        soft_sl_disp = f"£{soft_sl_gbp:,.2f}" if soft_sl_gbp >= 1.0 else f"£{soft_sl_gbp:,.4f}"
-        hard_sl_disp = f"£{hard_sl_gbp:,.2f}" if hard_sl_gbp >= 1.0 else f"£{hard_sl_gbp:,.4f}"
-        tp_disp = f"£{tp_gbp:,.2f}" if tp_gbp >= 1.0 else f"£{tp_gbp:,.4f}"
+        bb_touched = float(closed_row['low']) <= float(closed_row['bb_lower'])
+        is_green = float(closed_row['close']) > float(closed_row['open'])
 
-        risk_pct = round(((price_gbp - soft_sl_gbp) / price_gbp) * 100, 2)
-        hard_risk_pct = round(((price_gbp - hard_sl_gbp) / price_gbp) * 100, 2)
-        tp_pct = round(((tp_gbp - price_gbp) / price_gbp) * 100, 2)
+        raw_signal = 'NONE'
+        if vol_ratio >= 100:
+            if is_above_sma200:
+                if is_pinbar and rsi_4h <= max_pinbar_rsi:
+                    raw_signal = 'BUY_PINBAR'
+                elif rsi_4h <= rsi_signal_threshold or (bb_touched and rsi_4h <= bb_rebound_rsi_limit):
+                    if is_green or vol_ratio >= 130:
+                        raw_signal = 'BUY_REBOUND'
+                elif bb_touched and rsi_4h <= bounce_rsi_limit and is_green:
+                    raw_signal = 'BUY_BOUNCE'
 
-        net_tp_pct = max(0.0, tp_pct - 0.60)
-        net_risk_pct = risk_pct + 0.60
-        rr_ratio = round(net_tp_pct / net_risk_pct, 2) if net_risk_pct > 0 else 0.0
+        if btc_dump and symbol != 'BTC/USD' and raw_signal.startswith('BUY'):
+            logging.info(f"🛡️ BTC Guard blocked {raw_signal} signal on {symbol}.")
+            raw_signal = 'NONE'
 
-        raw_signal = eval_signal(last_row, rsi_signal_threshold, max_pinbar_rsi, is_above_sma200, vol_ratio)
+        current_signal_type = raw_signal
 
-        current_signal_type = 'NONE' if (btc_dumping and not is_core) else raw_signal
+        soft_sl = max(0.000001, signal_low * 0.995)
+        hard_sl = max(0.000001, min(soft_sl * 0.98, signal_low * 0.95))
+        
+        tp_level = bb_upper_val if price >= sma20_val else sma20_val
+
+        soft_sl_str = f"${soft_sl:,.2f}" if soft_sl >= 1.0 else f"${soft_sl:,.4f}"
+        hard_sl_str = f"${hard_sl:,.2f}" if hard_sl >= 1.0 else f"${hard_sl:,.4f}"
+        tp_str = f"${tp_level:,.2f}" if tp_level >= 1.0 else f"${tp_level:,.4f}"
+
+        risk_pct = round(((price - soft_sl) / price) * 100, 2)
+        hard_risk_pct = round(((price - hard_sl) / price) * 100, 2)
+        tp_pct = round(((tp_level - price) / price) * 100, 2)
+        rr_ratio = round(tp_pct / risk_pct, 2) if risk_pct > 0 else 0.0
+
         status_map = {
             'NONE': '⚪ Neutral',
             'BUY_REBOUND': '⚡️ QUICK REBOUND',
@@ -352,179 +288,175 @@ async def process_symbol(exchange_inst, symbol: str, usd_to_gbp: float, cache: d
             'BUY_BOUNCE': '🟡 BOUNCE ZONE'
         }
         status_txt = status_map.get(current_signal_type, '⚪ Neutral')
-        pinbar_txt = f"{int(pinbar_threshold * 100)}%" if is_pinbar else "None"
+        pinbar_txt = "55%" if is_pinbar else "None"
 
-        tv_link = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{tv_clean_symbol}"
+        clean_symbol = symbol.replace('/', '')
+        tv_url = f"https://www.tradingview.com/chart/?symbol=KRAKEN:{clean_symbol}"
+        clickable_symbol = f'<a href="{tv_url}"><b>{symbol}</b></a>'
 
-        digest_line = (
-            f"📈 <b>{symbol_display}</b> • {price_disp}\n"
-            f" ├ RSI (4H): {rsi_4h} | {sma200_txt}\n"
+        digest_item = (
+            f"📈 {clickable_symbol} • <code>{price_str}</code>\n"
+            f" ├ RSI (4H): <code>{rsi_4h}</code>\n"
+            f" ├ RSI (1D): <code>{rsi_1d_val}</code> | {trend_1d_status}\n"
             f" ├ Pinbar: {pinbar_txt}\n"
-            f" └ Status: {status_txt}\n\n"
+            f" └ Status: {status_txt}"
         )
-        digest_summary_row = {
-            'raw_symbol': symbol, 'symbol': symbol_display,
-            'price': price_disp, 'rsi': rsi_4h, 'sma200': sma200_txt, 'pinbar': pinbar_txt,
-            'status': status_txt, 'tv_symbol': tv_clean_symbol
-        }
 
         pending_alert = None
         candle_key = None
 
         if current_signal_type != 'NONE':
-            candle_key = f"ALERT_{symbol_display}_{ts_closed}_{current_signal_type}"
+            candle_key = f"ALERT_{symbol}_{candle_ts}_{current_signal_type}"
             already_alerted = (cache.get(candle_key) is not None)
 
-            if not already_alerted and (rr_ratio >= 1.2):
+            prev_bb_touched = float(prev_closed_row['low']) <= float(prev_closed_row['bb_lower'])
+            prev_pinbar = bool(prev_closed_row['pinbar'])
+
+            is_new_signal = False
+            if prev_vol_ratio < 100:
+                is_new_signal = True
+            else:
+                if current_signal_type == 'BUY_REBOUND':
+                    prev_was_rebound = (prev_rsi_4h <= rsi_signal_threshold) or (prev_bb_touched and prev_rsi_4h <= bb_rebound_rsi_limit)
+                    is_new_signal = not prev_was_rebound
+                elif current_signal_type == 'BUY_PINBAR':
+                    prev_was_pinbar = prev_pinbar and (prev_rsi_4h <= max_pinbar_rsi)
+                    is_new_signal = not prev_was_pinbar
+                elif current_signal_type == 'BUY_BOUNCE':
+                    prev_was_bounce = prev_bb_touched and (prev_rsi_4h <= bounce_rsi_limit)
+                    is_new_signal = not prev_was_bounce
+
+            should_alert = not already_alerted and is_new_signal and (rr_ratio >= 1.2)
+
+            if should_alert:
                 confirmations = []
-                confirmations.append(f"Main Trend: {sma200_txt}")
+                confirmations.append(f"Main Trend: {trend_1d_status}")
                 if is_pinbar:
-                    confirmations.append(f"Demand Wick 4H (Pinbar >= {int(pinbar_threshold * 100)}%)")
-                if float(last_row['close']) > float(last_row['open']):
+                    confirmations.append("Demand Wick 4H (Pinbar >= 55%)")
+                if is_green:
                     confirmations.append("Bullish Close: Candle closed green")
+                if bb_touched:
+                    confirmations.append("Tested Lower Bollinger Band (20, 2)")
+                if rsi_4h <= rsi_signal_threshold:
+                    confirmations.append(f"RSI 4H: <code>{rsi_4h}</code> | (1D): <code>{rsi_1d_val}</code>")
+                if stoch_turning_up:
+                    confirmations.append(f"Stochastic RSI curving up (%K: <code>{stoch_k}</code>)")
                 confirmations.append(f"Volume: {volume_str}")
 
-                conf_msg = ""
-                for i, c in enumerate(confirmations):
-                    prefix = "└ " if i == len(confirmations) - 1 else "├ "
-                    conf_msg += f"\n{prefix}{c}"
+                conf_msg = "\n├── " + "\n├── ".join(confirmations[:-1]) + f"\n└── {confirmations[-1]}" if len(confirmations) > 1 else f"\n└── {confirmations[0]}"
 
-                tp_target_name = "Middle BB 20" if price_gbp < sma20_gbp else "Upper BB 20"
-                status_emoji = "🟢" if rr_ratio >= 1.5 else "🟡"
-                entry_line = f"├ 🟢 Buy (Market): {price_disp}" if rr_ratio >= 1.5 else f"├ 🟡 Set Limit (50% Wick): {price_disp}"
+                tp_target_name = "Middle BB 20" if price < sma20_val else "Upper BB 20"
 
-                alert_header = f"⚡ <b>CRYPTO OPPORTUNITY (SWING 4H)</b> {status_emoji}"
+                if rr_ratio >= 1.5:
+                    status_emoji = "🟢"
+                    entry_line = f"├── 🟢 Buy (Market): <code>{price_str}</code>"
+                else:
+                    status_emoji = "🟡"
+                    limit_price = (price + signal_low) / 2
+                    limit_price_str = f"${limit_price:,.2f}" if limit_price >= 1.0 else f"${limit_price:,.4f}"
+                    entry_line = f"├── 🟡 Set Limit (50% Wick): <code>{limit_price_str}</code>"
+
+                alert_header = f"🟡 <b>BOUNCE ZONE (4H)</b> {status_emoji}" if current_signal_type == 'BUY_BOUNCE' else f"⚡ <b>CRYPTO OPPORTUNITY (SWING 4H)</b> {status_emoji}"
 
                 body = (
                     f"{alert_header}\n"
                     f"───────────────────\n"
-                    f"📈 Pair: {symbol_display}\n"
-                    f"💰 Market Price: {price_disp}\n"
-                    f"📊 RSI: {rsi_4h} (4H)\n\n"
+                    f"📈 Pair: {clickable_symbol}\n"
+                    f"💰 Market Price: <code>{price_str}</code>\n"
+                    f"📊 RSI: <code>{rsi_4h}</code> (4H) | <code>{rsi_1d_val}</code> (1D)\n\n"
                     f"⚙️ TRADE PLAN\n"
                     f"{entry_line}\n"
-                    f"├ ⚠️ Soft SL (4H): {soft_sl_disp} (-{risk_pct}%)\n"
-                    f"├ 🛡 Emerg. SL: {hard_sl_disp} (-{hard_risk_pct}%)\n"
-                    f"├ 🎯 TP ({tp_target_name}): {tp_disp} (+{tp_pct}%)\n"
-                    f"├ ⚖️ R:R Ratio: 1 : {rr_ratio}\n"
-                    f"└ 👉 ACTION: Touch of {tp_target_name} on 4H\n\n"
+                    f"├── ⚠️ Soft SL (4H): <code>{soft_sl_str}</code> (<code>-{risk_pct}%</code>)\n"
+                    f"├── 🛡️ Emerg. SL: <code>{hard_sl_str}</code> (<code>-{hard_risk_pct}%</code>)\n"
+                    f"├── 🎯 TP ({tp_target_name}): <code>{tp_str}</code> (<code>+{tp_pct}%</code>)\n"
+                    f"├── ⚖️ R:R Ratio: <code>1:{rr_ratio}</code>\n"
+                    f"└── 👉 ACTION: Touch of {tp_target_name} on 4H\n\n"
                     f"📈 Market Confirmations:{conf_msg}\n\n"
-                    f'👁 <a href="{tv_link}">View Chart on TradingView</a>'
+                    f'👁️ <a href="{tv_url}">View Chart on TradingView</a>'
                 )
-                pending_alert = (body, symbol_display, status_txt, price_disp, rsi_4h)
 
-        return {
-            'digest_line': digest_line,
-            'digest_summary_row': digest_summary_row,
-            'pending_alert': pending_alert,
-            'candle_key': candle_key
-        }
+                pending_alert = body
+                candle_key = f"ALERT_{symbol}_{candle_ts}_{current_signal_type}"
+
+        return (digest_item, symbol), pending_alert, candle_key
 
     except Exception as e:
-        logging.error(f"Błąd dla {symbol}: {e}")
-        return None
+        logging.error(f"Error analyzing {symbol}: {e}")
+        return None, None, None
 
-
-# --- 5. GŁÓWNA PĘTLA APLIKACJI ---
 async def main():
-    start_time = time.time()
-    logging.info("Starting Crypto Scanner V3.5 (Fast Live Mode)...")
-
-    uk_now = datetime.datetime.now(ZoneInfo('Europe/London'))
-    now_str = uk_now.strftime('%Y-%m-%d %H:%M')
-
-    sheet = init_google_sheet()
     cache = load_cache()
+    
+    try:
+        exchange_class = getattr(ccxt, EXCHANGE_NAME)
+        exchange = exchange_class({'enableRateLimit': True})
+    except AttributeError:
+        logging.warning(f"Exchange '{EXCHANGE_NAME}' not found. Defaulting to Kraken.")
+        exchange = ccxt.kraken({'enableRateLimit': True})
+    
+    try:
+        tz = pytz.timezone(USER_TZ)
+    except Exception:
+        tz = pytz.timezone('UTC')
 
-    exchange = ccxt.kraken({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}
-    })
+    local_now = datetime.now(tz)
+    today_str = local_now.strftime('%Y-%m-%d')
+    now_ts = datetime.now(timezone.utc).timestamp()
+    github_event = os.getenv('GITHUB_EVENT_NAME', '')
+
+    # --- BTC GUARD IMPLEMENTATION ---
+    btc_dump = False
+    try:
+        btc_data = await exchange.fetch_ohlcv('BTC/USD', timeframe='4h', limit=50)
+        if btc_data and len(btc_data) >= 20:
+            btc_df = pd.DataFrame(btc_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            btc_df = calculate_indicators(btc_df)
+            btc_last = btc_df.iloc[-2]
+            btc_prev = btc_df.iloc[-3]
+            btc_change = ((float(btc_last['close']) - float(btc_prev['close'])) / float(btc_prev['close'])) * 100
+            btc_rsi = float(btc_last['rsi'])
+            
+            if btc_change <= -4.0 or btc_rsi < 28.0:
+                btc_dump = True
+                logging.warning(f"🚨 ACTIVE BTC GUARD TRIGGERED: Market dump (Change: {btc_change:.2f}%, RSI: {btc_rsi}). Altcoin signals blocked.")
+    except Exception as e:
+        logging.error(f"Error checking background BTC status: {e}")
+    # ---------------------------------
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def sem_process(session, pair):
+        async with semaphore:
+            return await analyze_crypto(exchange, pair, session, cache, local_now, now_ts, today_str, github_event, btc_dump)
 
     try:
-        usd_to_gbp = await get_gbp_rate_async(exchange)
-        btc_dumping = False
-        btc_prefetched_df = await fetch_ohlcv_async(exchange, 'BTC/GBP')
-        if btc_prefetched_df is not None and len(btc_prefetched_df) >= 50:
-            btc_calc = calculate_indicators(btc_prefetched_df.copy())
-            btc_last = btc_calc.iloc[-2]
-            btc_prev = btc_calc.iloc[-3]
-            btc_change = ((float(btc_last['close']) - float(btc_prev['close'])) / float(btc_prev['close'])) * 100
-            if btc_change <= -1.5 or float(btc_last['rsi']) < 36.0:
-                btc_dumping = True
-
-        digest_lines_p1, digest_lines_p2, digest_lines_p3 = [], [], []
-        digest_summary_rows = []
-        pending_alerts = []
-        rows_to_append_sheets = []
-        success_count = 0
-
-        semaphore = asyncio.Semaphore(3)
-
-        async def sem_process(symbol):
-            async with semaphore:
-                pre_df = btc_prefetched_df if symbol == 'BTC/GBP' else None
-                return await process_symbol(exchange, symbol, usd_to_gbp, cache, btc_dumping=btc_dumping, pre_fetched_df_4h=pre_df)
-
-        async with httpx.AsyncClient() as http_client:
-            tasks = [sem_process(symbol) for symbol in SYMBOLS]
+        async with aiohttp.ClientSession() as session:
+            tasks = [sem_process(session, pair) for pair in PAIRS]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            digest_lines = []
             for res in results:
                 if isinstance(res, Exception) or res is None:
                     continue
+                digest_tuple, alert_msg, candle_key = res
+                if digest_tuple:
+                    digest_lines.append(digest_tuple)
+                if alert_msg:
+                    await send_telegram_alert_async(session, alert_msg)
+                    if candle_key:
+                        cache[candle_key] = True
 
-                success_count += 1
-                raw_sym = res['digest_summary_row']['raw_symbol']
-                if raw_sym in CRYPTO_P1:
-                    digest_lines_p1.append(res['digest_line'])
-                elif raw_sym in CRYPTO_P2:
-                    digest_lines_p2.append(res['digest_line'])
-                else:
-                    digest_lines_p3.append(res['digest_line'])
-
-                digest_summary_rows.append(res['digest_summary_row'])
-
-                if res['pending_alert'] and res['candle_key']:
-                    pending_alerts.append(res['pending_alert'])
-                    cache[res['candle_key']] = True
-
-            elapsed = round(time.time() - start_time, 2)
-            health_summary = f"🩺 <b>Autodiagnostyka Krypto:</b> Przeanalizowano {success_count}/{len(SYMBOLS)} monet w {elapsed}s."
-            logging.info(health_summary.replace('<b>', '').replace('</b>', ''))
-
-            write_github_step_summary(digest_summary_rows, health_msg=health_summary)
-            await process_telegram_commands_async(http_client, cache, digest_summary_rows, exchange=exchange)
-
-            if pending_alerts:
-                for msg, sym_disp, status_txt, price_disp, rsi_val in pending_alerts:
-                    await send_telegram_alert_async(http_client, msg)
-                    await asyncio.sleep(0.3)
-                    rows_to_append_sheets.append([now_str, sym_disp, status_txt, price_disp, f"RSI: {rsi_val}"])
-
-            if sheet and rows_to_append_sheets:
-                try:
-                    await asyncio.to_thread(sheet.append_rows, rows_to_append_sheets)
-                except Exception as e:
-                    logging.error(f"Błąd zapisu w Google Sheets: {e}")
-
-            save_cache(cache)
-
-        logging.info(f"Skaner krypto zakończył działanie w czasie: {elapsed}s.")
+            # --- TWARDA WYSYŁKA TYLKO RAZ DZIENNIE O 08:00 RANO ---
+            if local_now.hour == 8 and cache.get('DIGEST_DATE') != today_str:
+                cache['DIGEST_DATE'] = today_str
+                
+                if digest_lines:
+                    digest_title = "🌅 <b>MORNING CRYPTO MARKET DIGEST</b>"
+                    await send_chunked_digest(session, digest_title, digest_lines)
 
     finally:
         await exchange.close()
-
+        save_cache(cache)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        clean_err = html.escape(str(e))
-        logging.critical(f"KRYTYCZNY BŁĄD SKANERA KRYPTO: {e}", exc_info=True)
-        err_msg = f'🚨 <b>CRITICAL CRYPTO SCANNER ERROR:</b>\n<code>{clean_err}</code>'
-        async def send_critical_error():
-            async with httpx.AsyncClient() as http_client:
-                await send_telegram_alert_async(http_client, err_msg)
-        asyncio.run(send_critical_error())
-        raise e
+    asyncio.run(main())
