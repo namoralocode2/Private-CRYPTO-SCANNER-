@@ -601,12 +601,6 @@ async def main():
                 except Exception as e:
                     logging.error(f"Błąd zapisu w Google Sheets: {e}")
 
-            if uk_now.hour >= 21 and cache.get('DIGEST_DATE') != today_str:
-                if digest_lines:
-                    digest_msg = '📋 **CODZIENNE PODSUMOWANIE RYNKU KRYPTO - 21:00**\n───────────────────\n\n' + ''.join(digest_lines)
-                    await send_telegram_alert_async(http_client, digest_msg)
-                    cache['DIGEST_DATE'] = today_str
-
             save_cache(cache)
 
         logging.info(f"Skaner krypto zakończył działanie w czasie: {elapsed}s.")
