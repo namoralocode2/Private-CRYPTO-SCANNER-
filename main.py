@@ -1,27 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-Skaner krypto V3.1
+Skaner krypto V5.0
 
-Zmiany względem V3.0:
-- 1D: 260 świec, prawdziwe SMA200. Brak SMA200 albo cena pod SMA200 = brak longów.
-  Wodospad (RSI 1D < 38 i cena pod SMA50) też blokuje. Koniec komunikatu „bezpieczny”.
-- 4H bez SMA200 nie jest trendem wzrostowym. Sygnał odpada.
-- Wejście nad SMA200 (4H) wymaga pinbara albo dotknięcia dolnej BB. Samo niskie RSI nie wystarcza.
-- Kontrtrend pod SMA200 (4H) tylko gdy 1D jest nadal nad SMA200, świeca zielona i jest BB + ekstremum.
-- Plan transakcji w walucie pary (GBP albo USD). Funt przy parze USD jest tylko dopiskiem,
-  i tylko gdy Kraken oddał GBP/USD. Sztywne 0.79 wyleciało.
-- Cache ALERT_ zapisuje się po udanym sendMessage, nie przed.
-- Świeca z setupem, której nie wysłano (guard, R:R), dostaje BLOCK_, żeby następna mogła wejść.
-- Pinbar pokazuje realny % knota. Bollinger ma std(ddof=0), jak TradingView.
-- /status odpowiada tylko na TELEGRAM_CHAT_ID i TELEGRAM_ALLOWED_CHAT_IDS.
-- Guard BTC: zamknięta świeca 4H <= -2.5% albo 12h <= -4%. Bez progu RSI < 36.
-- Ręczny digest jest cięty tak, żeby nie wpaść w limit 4096.
+Zostaje logika V4.0. W tej wersji:
+- Najwyżej 1 nowy alert na skan. Drugi setup dostaje BLOCK_.
+- Filtr 3h: alert tylko gdy zamknięcie świecy 4H było nie dawniej niż 3 godziny temu.
+  Starszy setup odpada, nawet jeśli warunki nadal się świecą.
+- Świeży sygnał BTC/ETH (ten skan albo ostatnie COOLDOWN_HOURS) wycisza alty.
+- Cooldown pary po wysłanym alercie (domyślnie 12h).
+- Płynność: średni obrót 20×4H poniżej MIN_QUOTE_VOLUME odpada.
+- Alt słabszy od BTC o REL_LAG_PCT na 12h odpada.
+- Kontrtrend 4H wyłączony, chyba że ALLOW_COUNTERTREND=1.
+- Paper log: paper_krypto.csv. Po alercie śledzi SL, TP albo wyjście po 12 świecach.
+- Brak danych pary widać w digestcie, nie znika po cichu.
+- Raz dziennie, gdy nie ma alertu, Telegram dostaje „brak nowych sygnałów”.
+- Wiadomości Telegrama są w HTML.
 
-CACHE: CRYPTO_CACHE_PATH albo cache_krypto.json. Na Actions commituj ten plik.
+CACHE: CRYPTO_CACHE_PATH albo cache_krypto.json.
+PAPER: PAPER_PATH albo paper_krypto.csv.
+Na Actions commituj oba pliki.
 """
 
 import asyncio
+import csv
 import datetime
+import html
 import json
 import logging
 import math
@@ -64,23 +67,74 @@ else:
     SYMBOLS = CORE_CRYPTO + ALT_CRYPTO
 
 CACHE_FILE = os.getenv("CRYPTO_CACHE_PATH", "cache_krypto.json")
+PAPER_FILE = os.getenv("PAPER_PATH", "paper_krypto.csv")
 OHLCV_4H_LIMIT = 300
 OHLCV_1D_LIMIT = 260
 MIN_RR = 1.2
 FEE_PCT = 0.60
 BTC_DUMP_4H = -2.5
 BTC_DUMP_12H = -4.0
+PAPER_BARS = 12
+PAPER_FIELDS = ["ts", "symbol", "signal", "entry", "sl", "tp", "quote", "status", "exit", "bars", "note"]
+
+
+def env_float(name, default):
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logging.warning("Zła wartość %s=%s, zostawiam %s", name, raw, default)
+        return default
+
+
+def env_int(name, default):
+    return int(env_float(name, default))
+
+
+def env_flag(name):
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "tak"}
+
+
+MAX_ALERTS = 1
+COOLDOWN_SEC = max(1, env_int("COOLDOWN_HOURS", 12)) * 3600
+FRESH_HOURS = 3
+FRESH_SEC = FRESH_HOURS * 3600
+CANDLE_4H_SEC = 4 * 3600
+MIN_QUOTE_VOLUME = env_float("MIN_QUOTE_VOLUME", 25000)
+REL_LAG_PCT = env_float("REL_LAG_PCT", 3.0)
+ALLOW_COUNTERTREND = env_flag("ALLOW_COUNTERTREND")
 
 STATUS_TEXT = {
     "NONE": "⚪ Neutralny",
     "BLOCK_DAILY": "🛡 Blokada (1D pod SMA200)",
     "BLOCK_TREND": "⛔ Blokada (brak trendu 4H)",
     "BLOCK_BTC": "🛡 Blokada (BTC dump)",
+    "BLOCK_LIQ": "⛔ Blokada (płynność)",
+    "BLOCK_REL": "🛡 Blokada (słabszy od BTC)",
+    "BLOCK_COOLDOWN": "⏳ Cooldown po ostatnim alercie",
+    "BLOCK_FRESH": "⏳ Poza oknem 3h",
     "BUY_REBOUND": "⚡️ SZYBKIE ODBICIE (Popyt)",
     "BUY_PINBAR": "🕯️ PINBAR ODBICIE",
     "BUY_BOUNCE": "🟡 STREFA ODBICIA",
     "BUY_COUNTER": "⚠️ KONTRTREND 4H (1D nadal nad SMA200)",
 }
+
+
+def within_fresh_window(ts_open, now=None, fresh_sec=FRESH_SEC):
+    """Świeca 4H jest świeża przez 3h od zamknięcia. Lekki ujemny wiek to zegar, nie przyszłość."""
+    now = time.time() if now is None else now
+    age = now - (int(ts_open) + CANDLE_4H_SEC)
+    return -120 <= age <= fresh_sec
+
+
+def h(value) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def link(label, url) -> str:
+    return f'<a href="{html.escape(url, quote=True)}">{h(label)}</a>'
 
 
 def allowed_chat_ids():
@@ -132,6 +186,26 @@ def fnum(row, key):
     return value
 
 
+def fail_row(symbol, reason):
+    line = f"⚠️ {h(symbol)}: {h(reason)}\n\n"
+    return {
+        "ok": False,
+        "symbol": symbol,
+        "digest_row": {
+            "symbol": symbol,
+            "price": "—",
+            "rsi": "—",
+            "daily": reason,
+            "pinbar": "—",
+            "status": reason,
+            "digest_line": line,
+        },
+        "pending": None,
+        "suppress_key": None,
+        "paper_touched": False,
+    }
+
+
 def init_google_sheet():
     if not GOOGLE_CREDENTIALS or not SPREADSHEET_ID:
         logging.info("Brak Google Sheets. Pomijam arkusz.")
@@ -169,6 +243,20 @@ def prune_cache(cache_data):
         if key.startswith("ALERT_") or key.startswith("BLOCK_"):
             stamped = _unix_in_key(key)
             if stamped is not None and (now_ts - stamped) > 14 * 86400:
+                continue
+        elif key.startswith("COOLDOWN_"):
+            try:
+                if int(value) < now_ts:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        elif key.startswith("HEARTBEAT_"):
+            day = key.replace("HEARTBEAT_", "", 1)
+            try:
+                stamped = datetime.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+                if (datetime.datetime.now(datetime.timezone.utc) - stamped).days > 14:
+                    continue
+            except ValueError:
                 continue
         keep[key] = value
     return keep
@@ -212,6 +300,85 @@ def save_cache(cache_data):
                 pass
 
 
+def load_paper():
+    if not os.path.exists(PAPER_FILE):
+        return []
+    try:
+        with open(PAPER_FILE, "r", encoding="utf-8", newline="") as handle:
+            return list(csv.DictReader(handle))
+    except Exception as exc:
+        logging.error("Nie udało się wczytać paper log: %s", exc)
+        return []
+
+
+def save_paper(rows):
+    directory = os.path.dirname(os.path.abspath(PAPER_FILE)) or "."
+    os.makedirs(directory, exist_ok=True)
+    temp_name = None
+    try:
+        fd, temp_name = tempfile.mkstemp(dir=directory, prefix=".paper-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=PAPER_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: row.get(key, "") for key in PAPER_FIELDS})
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, PAPER_FILE)
+        temp_name = None
+    except Exception as exc:
+        logging.error("Nie udało się zapisać paper log: %s", exc)
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+
+
+def walk_paper(df, trade, max_bars=PAPER_BARS):
+    """SL ma pierwszeństwo, także gdy SL i TP wpadają w tę samą świecę."""
+    if str(trade.get("status") or "OPEN") != "OPEN":
+        return False
+    try:
+        entry_ts = int(float(trade["ts"]))
+        sl = float(trade["sl"])
+        tp = float(trade["tp"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    bars = 0
+    for rec in df.iloc[:-1].itertuples(index=False):
+        if int(rec.timestamp) // 1000 <= entry_ts:
+            continue
+        bars += 1
+        low = float(rec.low)
+        high = float(rec.high)
+        close = float(rec.close)
+        hit_sl = low <= sl
+        hit_tp = high >= tp
+        if hit_sl and hit_tp:
+            trade.update(status="SL", exit=sl, bars=bars, note="SL i TP w jednej świecy, liczę SL")
+            return True
+        if hit_sl:
+            trade.update(status="SL", exit=sl, bars=bars, note="")
+            return True
+        if hit_tp:
+            trade.update(status="TP", exit=tp, bars=bars, note="")
+            return True
+        if bars >= max_bars:
+            trade.update(status="TIME", exit=close, bars=bars, note="zamknięcie po czasie")
+            return True
+    return False
+
+
+def select_alerts(pending, max_alerts, core_blocks_alts):
+    pool = [item for item in pending if item["is_core"]] if core_blocks_alts else list(pending)
+    pool.sort(key=lambda item: (not item["is_core"], -float(item["rr"])))
+    kept = pool[:max_alerts]
+    kept_ids = {id(item) for item in kept}
+    dropped = [item for item in pending if id(item) not in kept_ids]
+    return kept, dropped
+
+
 async def send_telegram_alert_async(http_client, msg: str, custom_chat_id=None):
     """True = wysłane, False = błąd, None = brak tokena albo czatu."""
     chat_id = custom_chat_id or TELEGRAM_CHAT_ID
@@ -221,7 +388,7 @@ async def send_telegram_alert_async(http_client, msg: str, custom_chat_id=None):
     payload = {
         "chat_id": chat_id,
         "text": msg,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
     for attempt in (1, 2):
@@ -239,7 +406,7 @@ async def send_telegram_alert_async(http_client, msg: str, custom_chat_id=None):
 def split_messages(header: str, blocks, limit=3800):
     if not blocks:
         return []
-    cont = "📋 **ciąg dalszy**\n───────────────────\n\n"
+    cont = "📋 <b>ciąg dalszy</b>\n───────────────────\n\n"
     messages = []
     current = header
     for block in blocks:
@@ -258,11 +425,10 @@ def write_github_step_summary(digest_rows, health_msg=""):
     if not summary_file:
         return
     try:
-        plain = re.sub(r"[*`]", "", health_msg)
         with open(summary_file, "a", encoding="utf-8") as handle:
-            if plain:
-                handle.write(f"> {plain}\n\n")
-            handle.write("### Podsumowanie skanera krypto V3.1\n\n")
+            if health_msg:
+                handle.write(f"> {health_msg}\n\n")
+            handle.write("### Podsumowanie skanera krypto V5.0\n\n")
             handle.write("| Moneta | Cena | RSI 4H | 1D | Pinbar | Stan |\n")
             handle.write("| --- | --- | --- | --- | --- | --- |\n")
             for row in digest_rows:
@@ -303,7 +469,7 @@ async def process_telegram_commands_async(http_client, cache, digest_rows):
         if reply_to is None:
             return
         blocks = [row["digest_line"] for row in digest_rows]
-        header = "📋 **AKTUALNY STAN RYNKU KRYPTO**\n───────────────────\n\n"
+        header = "📋 <b>AKTUALNY STAN RYNKU KRYPTO</b>\n───────────────────\n\n"
         for part in split_messages(header, blocks):
             await send_telegram_alert_async(http_client, part, custom_chat_id=reply_to)
             await asyncio.sleep(0.4)
@@ -324,7 +490,7 @@ async def fetch_ohlcv_async(exchange_inst, symbol, timeframe="4h", limit=OHLCV_4
 
 
 async def get_gbp_per_usd(exchange_inst):
-    """Ile GBP za 1 USD. None, gdy kursu nie ma — nie zgadujemy."""
+    """Ile GBP za 1 USD. None, gdy kursu nie ma."""
     try:
         ticker = await exchange_inst.fetch_ticker("GBP/USD")
         gbp_usd = float(ticker["last"])
@@ -388,6 +554,16 @@ def closed_pair(df):
     return df.iloc[-2], df.iloc[-3]
 
 
+def close_change(df, older=-5, newer=-2):
+    if df is None or len(df) < abs(older) + 1:
+        return None
+    new = fnum(df.iloc[newer], "close")
+    old = fnum(df.iloc[older], "close")
+    if new is None or old is None or old <= 0:
+        return None
+    return (new - old) / old * 100
+
+
 def volume_ratio(row) -> int:
     volume = fnum(row, "volume")
     average = fnum(row, "vol_sma20")
@@ -414,7 +590,6 @@ def candle_bits(row):
 
 
 def setup_type(row, rsi_max, pinbar_rsi, vol_floor):
-    """Sam układ świecy. Trend i guard są nakładane później."""
     bits = candle_bits(row)
     if bits is None or bits["vol"] < 80:
         return "NONE"
@@ -493,7 +668,10 @@ def stoch_turning_up(current, previous) -> bool:
     return (previous_k <= 25 or current_k <= 25) and current_k > previous_k
 
 
-async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=False, pre_fetched_df_4h=None):
+async def process_symbol(
+    exchange_inst, symbol, usd_to_gbp, cache, papers,
+    btc_dumping=False, btc_ret_12h=None, pre_fetched_df_4h=None,
+):
     try:
         is_core = symbol in CORE_CRYPTO
         pinbar_wick = 0.55 if is_core else 0.60
@@ -502,22 +680,31 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
         vol_floor = 110
 
         if pre_fetched_df_4h is not None:
-            df = pre_fetched_df_4h
+            raw_df = pre_fetched_df_4h
             df_1d = await fetch_ohlcv_async(exchange_inst, symbol, timeframe="1d", limit=OHLCV_1D_LIMIT)
         else:
-            df, df_1d = await asyncio.gather(
+            raw_df, df_1d = await asyncio.gather(
                 fetch_ohlcv_async(exchange_inst, symbol, timeframe="4h", limit=OHLCV_4H_LIMIT),
                 fetch_ohlcv_async(exchange_inst, symbol, timeframe="1d", limit=OHLCV_1D_LIMIT),
             )
 
-        if df is None or len(df) < 210:
-            logging.warning("Za mało świec 4H dla %s: %s", symbol, 0 if df is None else len(df))
-            return None
+        if raw_df is None or len(raw_df) < 210:
+            logging.warning("Za mało świec 4H dla %s: %s", symbol, 0 if raw_df is None else len(raw_df))
+            return fail_row(symbol, "Brak historii 4H")
 
-        df = calculate_indicators(df, min_wick_ratio=pinbar_wick, max_upper_wick_ratio=0.20)
+        paper_touched = False
+        for trade in papers:
+            if trade.get("symbol") == symbol and walk_paper(raw_df, trade):
+                paper_touched = True
+                logging.info(
+                    "Paper %s %s → %s po %s świecach",
+                    symbol, trade.get("signal"), trade.get("status"), trade.get("bars"),
+                )
+
+        df = calculate_indicators(raw_df, min_wick_ratio=pinbar_wick, max_upper_wick_ratio=0.20)
         last_row, prev_row = closed_pair(df)
         if last_row is None or prev_row is None:
-            return None
+            return fail_row(symbol, "Brak zamkniętej świecy 4H")
 
         price = fnum(last_row, "close")
         signal_low = fnum(last_row, "low")
@@ -526,8 +713,7 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
         atr = fnum(last_row, "atr")
         rsi_4h = fnum(last_row, "rsi")
         if None in (price, signal_low, rsi_4h) or price <= 0:
-            logging.warning("Niepełna świeca 4H dla %s", symbol)
-            return None
+            return fail_row(symbol, "Niepełna świeca 4H")
         if atr is None:
             atr = signal_low * 0.01
         if sma20 is None:
@@ -538,12 +724,29 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
         above_4h, trend_txt = trend_4h(price, last_row)
         daily_ok, daily_txt = daily_state(df_1d)
         raw = setup_type(last_row, rsi_max, pinbar_rsi, vol_floor)
-        extreme = (not above_4h) and countertrend_ok(last_row)
+        extreme = ALLOW_COUNTERTREND and (not above_4h) and countertrend_ok(last_row)
         final_signal, status_key = resolve_signal(raw, above_4h, daily_ok, btc_dumping, is_core, extreme)
+
+        avg_vol = fnum(last_row, "vol_sma20") or 0.0
+        quote_vol = avg_vol * price
+        illiquid = quote_vol < MIN_QUOTE_VOLUME
+        alt_12h = close_change(df)
+        lagging = (
+            not is_core
+            and btc_ret_12h is not None
+            and alt_12h is not None
+            and alt_12h < btc_ret_12h - REL_LAG_PCT
+        )
+        if final_signal != "NONE" and lagging:
+            logging.info("%s słabszy od BTC: %.2f%% vs %.2f%%", symbol, alt_12h, btc_ret_12h)
+            final_signal, status_key = "NONE", "BLOCK_REL"
+        if illiquid:
+            logging.info("%s płynność %.0f < %.0f", symbol, quote_vol, MIN_QUOTE_VOLUME)
+            final_signal, status_key = "NONE", "BLOCK_LIQ"
 
         prev_raw = setup_type(prev_row, rsi_max, pinbar_rsi, vol_floor)
         prev_above, _prev_trend = trend_4h(fnum(prev_row, "close") or 0, prev_row)
-        prev_extreme = (not prev_above) and countertrend_ok(prev_row)
+        prev_extreme = ALLOW_COUNTERTREND and (not prev_above) and countertrend_ok(prev_row)
         prev_final, _prev_status = resolve_signal(
             prev_raw, prev_above, daily_ok, btc_dumping, is_core, prev_extreme
         )
@@ -555,16 +758,17 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
         prev_blocked = bool(cache.get(f"BLOCK_{symbol}_{prev_ts}"))
         already = bool(cache.get(candle_key))
         is_new = final_signal != prev_final or prev_blocked
+        cooled = int(cache.get(f"COOLDOWN_{symbol}") or 0) > ts_closed
 
         vol_ratio = volume_ratio(last_row)
         if vol_ratio >= 120:
-            volume_str = f"{vol_ratio}% średniej 🟢 (Wysoki)"
+            volume_str = f"{vol_ratio}% średniej (wysoki)"
         elif vol_ratio <= 80:
-            volume_str = f"{vol_ratio}% średniej 🔴 (Niski)"
+            volume_str = f"{vol_ratio}% średniej (niski)"
         elif vol_ratio == 0:
             volume_str = "brak danych"
         else:
-            volume_str = f"{vol_ratio}% średniej 🟡 (Standard)"
+            volume_str = f"{vol_ratio}% średniej (standard)"
 
         quote = quote_of(symbol)
         gbp_note = ""
@@ -581,11 +785,11 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
         icon = "🏛" if is_core else "🚀"
 
         digest_line = (
-            f"{icon} [{symbol}]({tv_link}): `{price_disp}`\n"
-            f"├ RSI (4H): `{rsi_4h}` | {trend_txt}\n"
-            f"├ 1D: {daily_txt}\n"
-            f"├ Pinbar: {pinbar_txt}\n"
-            f"└ Stan: {status_txt}\n\n"
+            f"{icon} {link(symbol, tv_link)}: <code>{h(price_disp)}</code>\n"
+            f"├ RSI (4H): <code>{h(rsi_4h)}</code> | {h(trend_txt)}\n"
+            f"├ 1D: {h(daily_txt)}\n"
+            f"├ Pinbar: {h(pinbar_txt)}\n"
+            f"└ Stan: {h(status_txt)}\n\n"
         )
         digest_row = {
             "symbol": symbol,
@@ -593,21 +797,33 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
             "price": price_disp,
             "rsi": rsi_4h,
             "daily": daily_txt,
-            "sma200": trend_txt,
             "pinbar": pinbar_txt,
             "status": status_txt,
             "digest_line": digest_line,
         }
 
-        if status_key.startswith("BLOCK") and raw != "NONE":
-            logging.info("%s %s → %s | %s | %s", symbol, raw, status_txt, trend_txt, daily_txt)
-
-        pending_alert = None
+        pending = None
         suppress_key = None
         if raw != "NONE" and final_signal == "NONE":
             suppress_key = f"BLOCK_{symbol}_{ts_closed}"
 
-        if final_signal != "NONE":
+        sendable = final_signal != "NONE"
+        block_status = None
+        if sendable and cooled:
+            block_status = "BLOCK_COOLDOWN"
+            logging.info("%s w cooldownie do świecy po %s", symbol, cache.get(f"COOLDOWN_{symbol}"))
+        elif sendable and not within_fresh_window(ts_closed):
+            block_status = "BLOCK_FRESH"
+            logging.info("%s poza oknem %sh od zamknięcia świecy 4H", symbol, FRESH_HOURS)
+        if block_status:
+            status_txt = STATUS_TEXT[block_status]
+            digest_row["status"] = status_txt
+            head, _sep, _old = digest_line.rpartition("└ Stan: ")
+            digest_row["digest_line"] = f"{head}└ Stan: {h(status_txt)}\n\n"
+            sendable = False
+            suppress_key = f"BLOCK_{symbol}_{ts_closed}"
+
+        if sendable:
             soft_sl = max(1e-12, signal_low - (1.5 * atr))
             hard_sl = max(1e-12, min(soft_sl * 0.98, signal_low * 0.95))
             tp = sma20 if price < sma20 else bb_upper
@@ -629,24 +845,26 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
             else:
                 bits = candle_bits(last_row) or {}
                 confirmations = [
-                    f"📈 **Trend 4H:** {trend_txt}",
-                    f"🛡 **Kontekst 1D:** {daily_txt}",
+                    f"📈 <b>Trend 4H:</b> {h(trend_txt)}",
+                    f"🛡 <b>Kontekst 1D:</b> {h(daily_txt)}",
                 ]
                 if final_signal == "BUY_COUNTER":
-                    confirmations.append("⚠️ **Kontrtrend:** 4H pod SMA200, 1D nadal nad SMA200. Mniejszy rozmiar.")
+                    confirmations.append("⚠️ <b>Kontrtrend:</b> 4H pod SMA200, 1D nadal nad SMA200. Mniejszy rozmiar.")
                 if is_pinbar:
-                    confirmations.append(f"🕯 **Knot popytowy 4H:** {pinbar_txt} (próg {int(pinbar_wick * 100)}%)")
+                    confirmations.append(f"🕯 <b>Knot popytowy 4H:</b> {h(pinbar_txt)} (próg {int(pinbar_wick * 100)}%)")
                 if bits.get("green"):
-                    confirmations.append("🟩 **Bycze zamknięcie** świecy 4H")
+                    confirmations.append("🟩 <b>Bycze zamknięcie</b> świecy 4H")
                 if bits.get("bb"):
-                    confirmations.append("📉 **Test dolnej wstęgi Bollingera (20, 2)**")
+                    confirmations.append("📉 <b>Test dolnej wstęgi Bollingera (20, 2)</b>")
                 if stoch_turning_up(last_row, prev_row):
-                    confirmations.append(f"🔄 **Stochastic RSI w górę** (%K: `{fnum(last_row, 'stoch_k')}`)")
-                confirmations.append(f"📊 **Wolumen:** {volume_str}")
+                    confirmations.append(f"🔄 <b>Stochastic RSI w górę</b> (%K: <code>{h(fnum(last_row, 'stoch_k'))}</code>)")
+                confirmations.append(f"📊 <b>Wolumen:</b> {h(volume_str)}")
+                if not is_core and alt_12h is not None and btc_ret_12h is not None:
+                    confirmations.append(f"📎 <b>12h vs BTC:</b> {alt_12h:.1f}% / BTC {btc_ret_12h:.1f}%")
                 conf_msg = "\n" + "\n".join(confirmations)
 
                 if rr_ratio >= 1.5:
-                    entry_line = f"├ 🟢 **Kupuj (Market):** `{money(price, quote)}`"
+                    entry_line = f"├ 🟢 <b>Kupuj (Market):</b> <code>{h(money(price, quote))}</code>"
                     badge = "🟢"
                 else:
                     limit_price = (price + signal_low) / 2
@@ -654,81 +872,98 @@ async def process_symbol(exchange_inst, symbol, usd_to_gbp, cache, btc_dumping=F
                     lim_tp = round(((tp - limit_price) / limit_price) * 100, 2)
                     lim_rr = round(max(0.0, lim_tp - FEE_PCT) / (lim_risk + FEE_PCT), 2) if (lim_risk + FEE_PCT) > 0 else rr_ratio
                     entry_line = (
-                        f"├ 🟡 **Ustaw Limit (50% knota):** `{money(limit_price, quote)}` "
-                        f"(R:R limitu `1 : {lim_rr}`)"
+                        f"├ 🟡 <b>Ustaw Limit (50% knota):</b> <code>{h(money(limit_price, quote))}</code> "
+                        f"(R:R limitu <code>1 : {lim_rr}</code>)"
                     )
                     badge = "🟡"
 
                 if final_signal == "BUY_COUNTER":
-                    header = f"⚠️ **KONTRTREND 4H — TYLKO PRZY TRENDZIE 1D** {badge}"
+                    header = f"⚠️ <b>KONTRTREND 4H — TYLKO PRZY TRENDZIE 1D</b> {badge}"
                 elif final_signal == "BUY_BOUNCE":
-                    header = f"🟡 **STREFA ODBICIA (4H)** {badge}"
+                    header = f"🟡 <b>STREFA ODBICIA (4H)</b> {badge}"
                 else:
-                    header = f"⚡️ **ODBICIE 4H** {badge}"
+                    header = f"⚡️ <b>ODBICIE 4H</b> {badge}"
 
-                fx_line = f"\n💷 **Orientacyjnie:** `{money(price * usd_to_gbp, 'GBP')}`" if gbp_note else ""
+                fx_line = f"\n💷 <b>Orientacyjnie:</b> <code>{h(money(price * usd_to_gbp, 'GBP'))}</code>" if gbp_note else ""
                 body = (
                     f"{header}\n"
                     f"───────────────────\n"
-                    f"{icon} **Para:** [{symbol}]({tv_link})\n"
-                    f"💰 **Cena ({quote}):** `{money(price, quote)}`{fx_line}\n"
-                    f"📊 **RSI (4H):** `{rsi_4h}`\n\n"
-                    f"⚙️ **PLAN TRANSAKCYJNY ({quote})**\n"
+                    f"{icon} <b>Para:</b> {link(symbol, tv_link)}\n"
+                    f"💰 <b>Cena ({h(quote)}):</b> <code>{h(money(price, quote))}</code>{fx_line}\n"
+                    f"📊 <b>RSI (4H):</b> <code>{h(rsi_4h)}</code>\n\n"
+                    f"⚙️ <b>PLAN TRANSAKCYJNY ({h(quote)})</b>\n"
                     f"{entry_line}\n"
-                    f"├ ⚠️ **Wyjście (zamknięcie 4H pod):** `{money(soft_sl, quote)}` (`-{risk_pct}%`)\n"
-                    f"├ 🛡 **Awaryjny SL:** `{money(hard_sl, quote)}` (`-{hard_risk_pct}%`)\n"
-                    f"├ 🎯 **Cel ({tp_name}):** `{money(tp, quote)}` (`+{tp_pct}%`)\n"
-                    f"└ ⚖️ **R:R netto (po {FEE_PCT:.2f}%):** `1 : {rr_ratio}`\n\n"
-                    f"📈 **Potwierdzenia:**{conf_msg}\n\n"
-                    f"👁 [Wykres na TradingView]({tv_link})"
+                    f"├ ⚠️ <b>Wyjście (zamknięcie 4H pod):</b> <code>{h(money(soft_sl, quote))}</code> (<code>-{risk_pct}%</code>)\n"
+                    f"├ 🛡 <b>Awaryjny SL:</b> <code>{h(money(hard_sl, quote))}</code> (<code>-{hard_risk_pct}%</code>)\n"
+                    f"├ 🎯 <b>Cel ({h(tp_name)}):</b> <code>{h(money(tp, quote))}</code> (<code>+{tp_pct}%</code>)\n"
+                    f"└ ⚖️ <b>R:R netto (po {FEE_PCT:.2f}%):</b> <code>1 : {rr_ratio}</code>\n\n"
+                    f"📈 <b>Potwierdzenia:</b>{conf_msg}\n\n"
+                    f"👁 {link('Wykres na TradingView', tv_link)}"
                 )
-                pending_alert = (body, symbol, status_txt, money(price, quote), rsi_4h)
+                pending = {
+                    "body": body,
+                    "symbol": symbol,
+                    "status": status_txt,
+                    "price": money(price, quote),
+                    "rsi": rsi_4h,
+                    "rr": rr_ratio,
+                    "is_core": is_core,
+                    "ts": ts_closed,
+                    "candle_key": candle_key,
+                    "signal": final_signal,
+                    "entry": price,
+                    "sl": soft_sl,
+                    "tp": tp,
+                    "quote": quote,
+                }
                 suppress_key = None
 
         return {
+            "ok": True,
+            "symbol": symbol,
             "digest_row": digest_row,
-            "pending_alert": pending_alert,
-            "candle_key": candle_key if pending_alert else None,
+            "pending": pending,
             "suppress_key": suppress_key,
+            "paper_touched": paper_touched,
         }
     except Exception as exc:
         logging.exception("Błąd dla %s: %s", symbol, exc)
-        return None
+        return fail_row(symbol, "Błąd obliczeń")
 
 
-async def btc_is_dumping(df_4h) -> bool:
+def btc_context(df_4h):
     if df_4h is None or len(df_4h) < 8:
-        logging.error("Brak danych BTC. Alty NIE są blokowane.")
-        return False
+        logging.error("Brak danych BTC. Alty NIE są blokowane dumpem.")
+        return False, None
     frame = calculate_indicators(df_4h)
-    last = frame.iloc[-2]
-    prev = frame.iloc[-3]
-    back = frame.iloc[-5]
-    last_close = fnum(last, "close")
-    prev_close = fnum(prev, "close")
-    back_close = fnum(back, "close")
-    if None in (last_close, prev_close, back_close) or prev_close <= 0 or back_close <= 0:
-        logging.error("BTC bez cen zamknięcia. Alty NIE są blokowane.")
-        return False
-    change_4h = (last_close - prev_close) / prev_close * 100
-    change_12h = (last_close - back_close) / back_close * 100
-    if change_4h <= BTC_DUMP_4H or change_12h <= BTC_DUMP_12H:
+    change_4h = close_change(frame, older=-3, newer=-2)
+    change_12h = close_change(frame, older=-5, newer=-2)
+    if change_4h is None or change_12h is None:
+        logging.error("BTC bez cen zamknięcia. Alty NIE są blokowane dumpem.")
+        return False, None
+    dumping = change_4h <= BTC_DUMP_4H or change_12h <= BTC_DUMP_12H
+    if dumping:
         logging.warning("BTC DUMP 4H %.2f%% / 12H %.2f%%. Alty zablokowane.", change_4h, change_12h)
-        return True
-    logging.info("BTC guard off: 4H %.2f%%, 12H %.2f%%.", change_4h, change_12h)
-    return False
+    else:
+        logging.info("BTC guard off: 4H %.2f%%, 12H %.2f%%.", change_4h, change_12h)
+    return dumping, change_12h
 
 
 async def main():
     started = time.time()
-    logging.info("Skaner krypto V3.1, pary: %s", len(SYMBOLS))
+    logging.info(
+        "Skaner krypto V5.0, pary: %s, max alertów: %s, okno: %sh, kontrtrend: %s",
+        len(SYMBOLS), MAX_ALERTS, FRESH_HOURS, ALLOW_COUNTERTREND,
+    )
 
     uk_now = datetime.datetime.now(ZoneInfo("Europe/London"))
+    today_str = uk_now.strftime("%Y-%m-%d")
     now_str = uk_now.strftime("%Y-%m-%d %H:%M")
     github_event = os.getenv("GITHUB_EVENT_NAME", "")
 
     sheet = init_google_sheet()
     cache = load_cache()
+    papers = load_paper()
     exchange = ccxt.kraken({
         "enableRateLimit": True,
         "timeout": 20000,
@@ -738,40 +973,60 @@ async def main():
     try:
         usd_to_gbp = await get_gbp_per_usd(exchange)
         btc_df = await fetch_ohlcv_async(exchange, "BTC/GBP", timeframe="4h", limit=OHLCV_4H_LIMIT)
-        btc_dumping = await btc_is_dumping(btc_df)
+        btc_dumping, btc_ret_12h = btc_context(btc_df)
 
         digest_rows = []
         pending = []
+        failed = []
         success = 0
+        paper_touched = False
         semaphore = asyncio.Semaphore(3)
 
         async def guarded(symbol):
             async with semaphore:
                 prefetched = btc_df if symbol == "BTC/GBP" else None
                 return await process_symbol(
-                    exchange, symbol, usd_to_gbp, cache,
-                    btc_dumping=btc_dumping, pre_fetched_df_4h=prefetched,
+                    exchange, symbol, usd_to_gbp, cache, papers,
+                    btc_dumping=btc_dumping, btc_ret_12h=btc_ret_12h, pre_fetched_df_4h=prefetched,
                 )
 
         async with httpx.AsyncClient() as http_client:
             results = await asyncio.gather(*(guarded(symbol) for symbol in SYMBOLS), return_exceptions=True)
             for result in results:
-                if isinstance(result, Exception) or result is None:
-                    if isinstance(result, Exception):
-                        logging.error("Task pary padł: %s", result)
+                if isinstance(result, Exception):
+                    logging.error("Task pary padł: %s", result)
                     continue
-                success += 1
-                digest_rows.append(result["digest_row"])
-                if result["suppress_key"]:
+                if result.get("ok"):
+                    success += 1
+                else:
+                    failed.append(result.get("symbol") or "?")
+                if result.get("paper_touched"):
+                    paper_touched = True
+                if result.get("digest_row"):
+                    digest_rows.append(result["digest_row"])
+                if result.get("suppress_key"):
                     cache[result["suppress_key"]] = True
-                if result["pending_alert"] and result["candle_key"]:
-                    pending.append((result["pending_alert"], result["candle_key"]))
+                if result.get("pending"):
+                    pending.append(result["pending"])
+
+            if paper_touched:
+                save_paper(papers)
+
+            last_core = int(cache.get("LAST_CORE_TS") or 0)
+            core_recent = last_core > 0 and (time.time() - last_core) < COOLDOWN_SEC
+            core_now = any(item["is_core"] for item in pending)
+            kept, dropped = select_alerts(pending, MAX_ALERTS, core_recent or core_now)
+            for item in dropped:
+                cache[f"BLOCK_{item['symbol']}_{item['ts']}"] = True
+                logging.info("Pominięty alert %s (limit %s albo świeży sygnał BTC/ETH)", item["symbol"], MAX_ALERTS)
 
             save_cache(cache)
             elapsed = round(time.time() - started, 2)
+            missed = ", ".join(failed) if failed else "brak"
             health = (
-                f"Autodiagnostyka krypto: {success}/{len(SYMBOLS)} par w {elapsed}s. "
-                f"BTC dump={btc_dumping}."
+                f"Autodiagnostyka krypto V5.0: {success}/{len(SYMBOLS)} par w {elapsed}s. "
+                f"Bez danych: {missed}. BTC dump={btc_dumping}. "
+                f"Alerty do wysyłki: {len(kept)}."
             )
             logging.info(health)
             write_github_step_summary(digest_rows, health_msg=health)
@@ -779,7 +1034,7 @@ async def main():
             save_cache(cache)
 
             if github_event == "workflow_dispatch" and digest_rows:
-                header = "🎯 **RĘCZNY SKAN RYNKU KRYPTO**\n───────────────────\n\n"
+                header = "🎯 <b>RĘCZNY SKAN RYNKU KRYPTO</b>\n───────────────────\n\n"
                 blocks = [row["digest_line"] for row in digest_rows]
                 for part in split_messages(header, blocks):
                     sent = await send_telegram_alert_async(http_client, part)
@@ -789,14 +1044,35 @@ async def main():
                     await asyncio.sleep(0.4)
 
             sheet_rows = []
-            for (body, sym, status_txt, price_disp, rsi_val), candle_key in pending:
-                sent = await send_telegram_alert_async(http_client, body)
+            sent_count = 0
+            for item in kept:
+                sent = await send_telegram_alert_async(http_client, item["body"])
                 if sent is not True:
-                    logging.error("Nie blokuję %s — Telegram nie przyjął alertu.", candle_key)
+                    logging.error("Nie blokuję %s — Telegram nie przyjął alertu.", item["candle_key"])
                     continue
-                cache[candle_key] = True
+                sent_count += 1
+                cache[item["candle_key"]] = True
+                cache[f"COOLDOWN_{item['symbol']}"] = item["ts"] + COOLDOWN_SEC
+                if item["is_core"]:
+                    cache["LAST_CORE_TS"] = item["ts"]
                 save_cache(cache)
-                sheet_rows.append([now_str, sym, status_txt, price_disp, f"RSI: {rsi_val}"])
+                papers.append({
+                    "ts": item["ts"],
+                    "symbol": item["symbol"],
+                    "signal": item["signal"],
+                    "entry": item["entry"],
+                    "sl": item["sl"],
+                    "tp": item["tp"],
+                    "quote": item["quote"],
+                    "status": "OPEN",
+                    "exit": "",
+                    "bars": "",
+                    "note": "",
+                })
+                save_paper(papers)
+                sheet_rows.append([
+                    now_str, item["symbol"], item["status"], item["price"], f"RSI: {item['rsi']}",
+                ])
                 await asyncio.sleep(0.3)
 
             if sheet and sheet_rows:
@@ -806,6 +1082,17 @@ async def main():
                 except Exception as exc:
                     logging.error("Błąd zapisu Google Sheets: %s", exc)
 
+            heartbeat_key = f"HEARTBEAT_{today_str}"
+            if sent_count == 0 and github_event != "workflow_dispatch" and not cache.get(heartbeat_key):
+                note = (
+                    "📋 <b>Skan krypto V5.0</b>\n"
+                    "Brak nowych alertów.\n"
+                    f"Pary: <code>{success}/{len(SYMBOLS)}</code>. Bez danych: {h(missed)}.\n"
+                    f"BTC dump: <code>{'tak' if btc_dumping else 'nie'}</code>."
+                )
+                sent = await send_telegram_alert_async(http_client, note)
+                if sent is True:
+                    cache[heartbeat_key] = True
             save_cache(cache)
         logging.info("Koniec skanu w %ss.", round(time.time() - started, 2))
     finally:
@@ -817,8 +1104,8 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception as exc:
         logging.critical("KRYTYCZNY BŁĄD SKANERA KRYPTO: %s", exc, exc_info=True)
-        clean = str(exc).replace("_", "\\_").replace("*", "\\*").replace("`", "'")
-        err_msg = f"🚨 **KRYTYCZNY BŁĄD SKANERA KRYPTO:**\n`{clean[:500]}`"
+        clean = h(str(exc))[:500]
+        err_msg = f"🚨 <b>KRYTYCZNY BŁĄD SKANERA KRYPTO</b>\n<code>{clean}</code>"
 
         async def send_critical_error():
             async with httpx.AsyncClient() as http_client:
