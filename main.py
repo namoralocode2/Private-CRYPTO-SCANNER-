@@ -5,20 +5,12 @@ Skaner krypto V5.0
 Zostaje logika V4.0. W tej wersji:
 - Najwyżej 1 nowy alert na skan. Drugi setup dostaje BLOCK_.
 - Filtr 3h: alert tylko gdy zamknięcie świecy 4H było nie dawniej niż 3 godziny temu.
-  Starszy setup odpada, nawet jeśli warunki nadal się świecą.
 - Świeży sygnał BTC/ETH (ten skan albo ostatnie COOLDOWN_HOURS) wycisza alty.
 - Cooldown pary po wysłanym alercie (domyślnie 12h).
-- Płynność: średni obrót 20×4H poniżej MIN_QUOTE_VOLUME odpada.
-- Alt słabszy od BTC o REL_LAG_PCT na 12h odpada.
-- Kontrtrend 4H wyłączony, chyba że ALLOW_COUNTERTREND=1.
-- Paper log: paper_krypto.csv. Po alercie śledzi SL, TP albo wyjście po 12 świecach.
-- Brak danych pary widać w digestcie, nie znika po cichu.
-- Raz dziennie, gdy nie ma alertu, Telegram dostaje „brak nowych sygnałów”.
-- Wiadomości Telegrama są w HTML.
+- Płynność, relative strength vs BTC, paper log, HTML Telegram.
+- Poprawka Google Sheets: szuka zakładki Krypto, tworzy gdy brak, nie wywala skanu.
 
-CACHE: CRYPTO_CACHE_PATH albo cache_krypto.json.
-PAPER: PAPER_PATH albo paper_krypto.csv.
-Na Actions commituj oba pliki.
+CACHE: cache_krypto.json | PAPER: paper_krypto.csv
 """
 
 import asyncio
@@ -59,12 +51,8 @@ ALT_CRYPTO = [
     "SUI/GBP", "AAVE/GBP", "FET/USD",
     "NEAR/USD", "HNT/USD", "ARB/USD",
 ]
-
 env_crypto = os.getenv("CRYPTO_PAIRS")
-if env_crypto:
-    SYMBOLS = [s.strip() for s in env_crypto.split(",") if s.strip()]
-else:
-    SYMBOLS = CORE_CRYPTO + ALT_CRYPTO
+SYMBOLS = [s.strip() for s in env_crypto.split(",") if s.strip()] if env_crypto else CORE_CRYPTO + ALT_CRYPTO
 
 CACHE_FILE = os.getenv("CRYPTO_CACHE_PATH", "cache_krypto.json")
 PAPER_FILE = os.getenv("PAPER_PATH", "paper_krypto.csv")
@@ -123,7 +111,6 @@ STATUS_TEXT = {
 
 
 def within_fresh_window(ts_open, now=None, fresh_sec=FRESH_SEC):
-    """Świeca 4H jest świeża przez 3h od zamknięcia. Lekki ujemny wiek to zegar, nie przyszłość."""
     now = time.time() if now is None else now
     age = now - (int(ts_open) + CANDLE_4H_SEC)
     return -120 <= age <= fresh_sec
@@ -141,8 +128,7 @@ def allowed_chat_ids():
     found = set()
     if TELEGRAM_CHAT_ID:
         found.add(str(TELEGRAM_CHAT_ID))
-    extra = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS") or ""
-    for part in extra.split(","):
+    for part in (os.getenv("TELEGRAM_ALLOWED_CHAT_IDS") or "").split(","):
         part = part.strip()
         if part:
             found.add(part)
@@ -192,24 +178,19 @@ def fail_row(symbol, reason):
         "ok": False,
         "symbol": symbol,
         "digest_row": {
-            "symbol": symbol,
-            "price": "—",
-            "rsi": "—",
-            "daily": reason,
-            "pinbar": "—",
-            "status": reason,
-            "digest_line": line,
+            "symbol": symbol, "price": "—", "rsi": "—", "daily": reason,
+            "pinbar": "—", "status": reason, "digest_line": line,
         },
-        "pending": None,
-        "suppress_key": None,
-        "paper_touched": False,
+        "pending": None, "suppress_key": None, "paper_touched": False,
     }
 
 
-def init_google_sheet():
+def init_google_sheet(default_tab="Krypto"):
+    """Tylko otwarcie arkusza. Błąd nie wywala skanera — wraca None i idzie dalej."""
     if not GOOGLE_CREDENTIALS or not SPREADSHEET_ID:
         logging.info("Brak Google Sheets. Pomijam arkusz.")
         return None
+    sheet_title = (os.getenv("GOOGLE_SHEET_TAB") or default_tab).strip() or default_tab
     try:
         raw_id = SPREADSHEET_ID.strip()
         if "/d/" in raw_id:
@@ -223,9 +204,27 @@ def init_google_sheet():
             "https://www.googleapis.com/auth/drive",
         ]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        return gspread.authorize(creds).open_by_key(clean_sheet_id).worksheet("Krypto")
+        spreadsheet = gspread.authorize(creds).open_by_key(clean_sheet_id)
+
+        worksheet = None
+        titles = []
+        for ws in spreadsheet.worksheets():
+            titles.append(ws.title)
+            if ws.title == sheet_title or ws.title.casefold().strip() == sheet_title.casefold().strip():
+                worksheet = ws
+                break
+        if worksheet is None:
+            logging.warning(
+                "Brak zakładki '%s' (widzę: %s) — tworzę.",
+                sheet_title, ", ".join(titles) if titles else "nic",
+            )
+            worksheet = spreadsheet.add_worksheet(title=sheet_title, rows=2000, cols=12)
+            worksheet.append_row(["Data i Czas", "Moneta", "Sygnał", "Cena", "RSI"])
+
+        logging.info("Google Sheets OK: %s / %s", spreadsheet.title, worksheet.title)
+        return worksheet
     except Exception as exc:
-        logging.error("Błąd inicjalizacji Google Sheets: %s", exc)
+        logging.error("Błąd inicjalizacji Google Sheets (%s): %s", type(exc).__name__, exc)
         return None
 
 
@@ -336,7 +335,6 @@ def save_paper(rows):
 
 
 def walk_paper(df, trade, max_bars=PAPER_BARS):
-    """SL ma pierwszeństwo, także gdy SL i TP wpadają w tę samą świecę."""
     if str(trade.get("status") or "OPEN") != "OPEN":
         return False
     try:
@@ -350,11 +348,8 @@ def walk_paper(df, trade, max_bars=PAPER_BARS):
         if int(rec.timestamp) // 1000 <= entry_ts:
             continue
         bars += 1
-        low = float(rec.low)
-        high = float(rec.high)
-        close = float(rec.close)
-        hit_sl = low <= sl
-        hit_tp = high >= tp
+        low, high, close = float(rec.low), float(rec.high), float(rec.close)
+        hit_sl, hit_tp = low <= sl, high >= tp
         if hit_sl and hit_tp:
             trade.update(status="SL", exit=sl, bars=bars, note="SL i TP w jednej świecy, liczę SL")
             return True
@@ -380,17 +375,11 @@ def select_alerts(pending, max_alerts, core_blocks_alts):
 
 
 async def send_telegram_alert_async(http_client, msg: str, custom_chat_id=None):
-    """True = wysłane, False = błąd, None = brak tokena albo czatu."""
     chat_id = custom_chat_id or TELEGRAM_CHAT_ID
     if not TELEGRAM_TOKEN or not chat_id:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": msg,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
+    payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True}
     for attempt in (1, 2):
         try:
             response = await http_client.post(url, json=payload, timeout=15.0)
@@ -407,8 +396,7 @@ def split_messages(header: str, blocks, limit=3800):
     if not blocks:
         return []
     cont = "📋 <b>ciąg dalszy</b>\n───────────────────\n\n"
-    messages = []
-    current = header
+    messages, current = [], header
     for block in blocks:
         if len(current) + len(block) > limit and current != header:
             messages.append(current.rstrip())
@@ -429,8 +417,7 @@ def write_github_step_summary(digest_rows, health_msg=""):
             if health_msg:
                 handle.write(f"> {health_msg}\n\n")
             handle.write("### Podsumowanie skanera krypto V5.0\n\n")
-            handle.write("| Moneta | Cena | RSI 4H | 1D | Pinbar | Stan |\n")
-            handle.write("| --- | --- | --- | --- | --- | --- |\n")
+            handle.write("| Moneta | Cena | RSI 4H | 1D | Pinbar | Stan |\n| --- | --- | --- | --- | --- | --- |\n")
             for row in digest_rows:
                 handle.write(
                     "| **{symbol}** | {price} | {rsi} | {daily} | {pinbar} | {status} |\n".format(
@@ -490,14 +477,13 @@ async def fetch_ohlcv_async(exchange_inst, symbol, timeframe="4h", limit=OHLCV_4
 
 
 async def get_gbp_per_usd(exchange_inst):
-    """Ile GBP za 1 USD. None, gdy kursu nie ma."""
     try:
         ticker = await exchange_inst.fetch_ticker("GBP/USD")
         gbp_usd = float(ticker["last"])
         if gbp_usd > 0:
             return 1.0 / gbp_usd
     except Exception as exc:
-        logging.warning("Brak kursu GBP/USD, pary USD bez przeliczenia: %s", exc)
+        logging.warning("Brak kursu GBP/USD: %s", exc)
     return None
 
 
@@ -510,13 +496,11 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean().replace(0, 1e-10)
     rs = avg_gain / avg_loss
     df["rsi"] = (100 - (100 / (1 + rs))).round(2)
-
     rsi_min = df["rsi"].rolling(window=14).min()
     rsi_max = df["rsi"].rolling(window=14).max()
     stoch_rsi = (df["rsi"] - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
     df["stoch_k"] = stoch_rsi.rolling(window=3).mean().round(2)
     df["stoch_d"] = df["stoch_k"].rolling(window=3).mean().round(2)
-
     df["sma20"] = df["close"].rolling(window=20).mean()
     df["sma50"] = df["close"].rolling(window=50).mean()
     df["sma200"] = df["close"].rolling(window=200).mean()
@@ -524,14 +508,12 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
     df["bb_upper"] = df["sma20"] + (df["std20"] * 2)
     df["bb_lower"] = df["sma20"] - (df["std20"] * 2)
     df["vol_sma20"] = df["volume"].rolling(window=20).mean()
-
     true_range = pd.concat([
         df["high"] - df["low"],
         (df["high"] - df["close"].shift(1)).abs(),
         (df["low"] - df["close"].shift(1)).abs(),
     ], axis=1).max(axis=1)
     df["atr"] = true_range.rolling(window=14).mean()
-
     span = df["high"] - df["low"]
     body = (df["close"] - df["open"]).abs()
     lower_wick = df[["open", "close"]].min(axis=1) - df["low"]
@@ -548,7 +530,6 @@ def calculate_indicators(df, min_wick_ratio=0.60, max_upper_wick_ratio=0.20):
 
 
 def closed_pair(df):
-    """CCXT dokleja niedomkniętą świecę na końcu. Sygnał jest na iloc[-2]."""
     if df is None or len(df) < 5:
         return None, None
     return df.iloc[-2], df.iloc[-3]
@@ -696,10 +677,7 @@ async def process_symbol(
         for trade in papers:
             if trade.get("symbol") == symbol and walk_paper(raw_df, trade):
                 paper_touched = True
-                logging.info(
-                    "Paper %s %s → %s po %s świecach",
-                    symbol, trade.get("signal"), trade.get("status"), trade.get("bars"),
-                )
+                logging.info("Paper %s %s → %s po %s świecach", symbol, trade.get("signal"), trade.get("status"), trade.get("bars"))
 
         df = calculate_indicators(raw_df, min_wick_ratio=pinbar_wick, max_upper_wick_ratio=0.20)
         last_row, prev_row = closed_pair(df)
@@ -732,9 +710,7 @@ async def process_symbol(
         illiquid = quote_vol < MIN_QUOTE_VOLUME
         alt_12h = close_change(df)
         lagging = (
-            not is_core
-            and btc_ret_12h is not None
-            and alt_12h is not None
+            not is_core and btc_ret_12h is not None and alt_12h is not None
             and alt_12h < btc_ret_12h - REL_LAG_PCT
         )
         if final_signal != "NONE" and lagging:
@@ -745,11 +721,9 @@ async def process_symbol(
             final_signal, status_key = "NONE", "BLOCK_LIQ"
 
         prev_raw = setup_type(prev_row, rsi_max, pinbar_rsi, vol_floor)
-        prev_above, _prev_trend = trend_4h(fnum(prev_row, "close") or 0, prev_row)
+        prev_above, _ = trend_4h(fnum(prev_row, "close") or 0, prev_row)
         prev_extreme = ALLOW_COUNTERTREND and (not prev_above) and countertrend_ok(prev_row)
-        prev_final, _prev_status = resolve_signal(
-            prev_raw, prev_above, daily_ok, btc_dumping, is_core, prev_extreme
-        )
+        prev_final, _ = resolve_signal(prev_raw, prev_above, daily_ok, btc_dumping, is_core, prev_extreme)
 
         ts_closed = int(last_row["timestamp"] / 1000)
         prev_ts = int(prev_row["timestamp"] / 1000)
@@ -771,10 +745,7 @@ async def process_symbol(
             volume_str = f"{vol_ratio}% średniej (standard)"
 
         quote = quote_of(symbol)
-        gbp_note = ""
-        if quote == "USD" and usd_to_gbp:
-            gbp_note = f" (≈ {money(price * usd_to_gbp, 'GBP')})"
-
+        gbp_note = f" (≈ {money(price * usd_to_gbp, 'GBP')})" if quote == "USD" and usd_to_gbp else ""
         wick = fnum(last_row, "lower_wick_ratio")
         is_pinbar = bool(last_row["pinbar"]) if pd.notna(last_row.get("pinbar", False)) else False
         pinbar_txt = f"{int(round(wick * 100))}%" if is_pinbar and wick is not None else "Brak"
@@ -792,14 +763,8 @@ async def process_symbol(
             f"└ Stan: {h(status_txt)}\n\n"
         )
         digest_row = {
-            "symbol": symbol,
-            "icon": icon,
-            "price": price_disp,
-            "rsi": rsi_4h,
-            "daily": daily_txt,
-            "pinbar": pinbar_txt,
-            "status": status_txt,
-            "digest_line": digest_line,
+            "symbol": symbol, "icon": icon, "price": price_disp, "rsi": rsi_4h,
+            "daily": daily_txt, "pinbar": pinbar_txt, "status": status_txt, "digest_line": digest_line,
         }
 
         pending = None
@@ -818,7 +783,7 @@ async def process_symbol(
         if block_status:
             status_txt = STATUS_TEXT[block_status]
             digest_row["status"] = status_txt
-            head, _sep, _old = digest_line.rpartition("└ Stan: ")
+            head, _, _ = digest_line.rpartition("└ Stan: ")
             digest_row["digest_line"] = f"{head}└ Stan: {h(status_txt)}\n\n"
             sendable = False
             suppress_key = f"BLOCK_{symbol}_{ts_closed}"
@@ -886,13 +851,11 @@ async def process_symbol(
 
                 fx_line = f"\n💷 <b>Orientacyjnie:</b> <code>{h(money(price * usd_to_gbp, 'GBP'))}</code>" if gbp_note else ""
                 body = (
-                    f"{header}\n"
-                    f"───────────────────\n"
+                    f"{header}\n───────────────────\n"
                     f"{icon} <b>Para:</b> {link(symbol, tv_link)}\n"
                     f"💰 <b>Cena ({h(quote)}):</b> <code>{h(money(price, quote))}</code>{fx_line}\n"
                     f"📊 <b>RSI (4H):</b> <code>{h(rsi_4h)}</code>\n\n"
-                    f"⚙️ <b>PLAN TRANSAKCYJNY ({h(quote)})</b>\n"
-                    f"{entry_line}\n"
+                    f"⚙️ <b>PLAN TRANSAKCYJNY ({h(quote)})</b>\n{entry_line}\n"
                     f"├ ⚠️ <b>Wyjście (zamknięcie 4H pod):</b> <code>{h(money(soft_sl, quote))}</code> (<code>-{risk_pct}%</code>)\n"
                     f"├ 🛡 <b>Awaryjny SL:</b> <code>{h(money(hard_sl, quote))}</code> (<code>-{hard_risk_pct}%</code>)\n"
                     f"├ 🎯 <b>Cel ({h(tp_name)}):</b> <code>{h(money(tp, quote))}</code> (<code>+{tp_pct}%</code>)\n"
@@ -901,30 +864,16 @@ async def process_symbol(
                     f"👁 {link('Wykres na TradingView', tv_link)}"
                 )
                 pending = {
-                    "body": body,
-                    "symbol": symbol,
-                    "status": status_txt,
-                    "price": money(price, quote),
-                    "rsi": rsi_4h,
-                    "rr": rr_ratio,
-                    "is_core": is_core,
-                    "ts": ts_closed,
-                    "candle_key": candle_key,
-                    "signal": final_signal,
-                    "entry": price,
-                    "sl": soft_sl,
-                    "tp": tp,
-                    "quote": quote,
+                    "body": body, "symbol": symbol, "status": status_txt,
+                    "price": money(price, quote), "rsi": rsi_4h, "rr": rr_ratio,
+                    "is_core": is_core, "ts": ts_closed, "candle_key": candle_key,
+                    "signal": final_signal, "entry": price, "sl": soft_sl, "tp": tp, "quote": quote,
                 }
                 suppress_key = None
 
         return {
-            "ok": True,
-            "symbol": symbol,
-            "digest_row": digest_row,
-            "pending": pending,
-            "suppress_key": suppress_key,
-            "paper_touched": paper_touched,
+            "ok": True, "symbol": symbol, "digest_row": digest_row,
+            "pending": pending, "suppress_key": suppress_key, "paper_touched": paper_touched,
         }
     except Exception as exc:
         logging.exception("Błąd dla %s: %s", symbol, exc)
@@ -955,29 +904,22 @@ async def main():
         "Skaner krypto V5.0, pary: %s, max alertów: %s, okno: %sh, kontrtrend: %s",
         len(SYMBOLS), MAX_ALERTS, FRESH_HOURS, ALLOW_COUNTERTREND,
     )
-
     uk_now = datetime.datetime.now(ZoneInfo("Europe/London"))
     today_str = uk_now.strftime("%Y-%m-%d")
     now_str = uk_now.strftime("%Y-%m-%d %H:%M")
     github_event = os.getenv("GITHUB_EVENT_NAME", "")
 
-    sheet = init_google_sheet()
+    sheet = init_google_sheet("Krypto")
     cache = load_cache()
     papers = load_paper()
-    exchange = ccxt.kraken({
-        "enableRateLimit": True,
-        "timeout": 20000,
-        "options": {"defaultType": "spot"},
-    })
+    exchange = ccxt.kraken({"enableRateLimit": True, "timeout": 20000, "options": {"defaultType": "spot"}})
 
     try:
         usd_to_gbp = await get_gbp_per_usd(exchange)
         btc_df = await fetch_ohlcv_async(exchange, "BTC/GBP", timeframe="4h", limit=OHLCV_4H_LIMIT)
         btc_dumping, btc_ret_12h = btc_context(btc_df)
 
-        digest_rows = []
-        pending = []
-        failed = []
+        digest_rows, pending, failed = [], [], []
         success = 0
         paper_touched = False
         semaphore = asyncio.Semaphore(3)
@@ -1025,8 +967,7 @@ async def main():
             missed = ", ".join(failed) if failed else "brak"
             health = (
                 f"Autodiagnostyka krypto V5.0: {success}/{len(SYMBOLS)} par w {elapsed}s. "
-                f"Bez danych: {missed}. BTC dump={btc_dumping}. "
-                f"Alerty do wysyłki: {len(kept)}."
+                f"Bez danych: {missed}. BTC dump={btc_dumping}. Alerty do wysyłki: {len(kept)}."
             )
             logging.info(health)
             write_github_step_summary(digest_rows, health_msg=health)
@@ -1035,8 +976,7 @@ async def main():
 
             if github_event == "workflow_dispatch" and digest_rows:
                 header = "🎯 <b>RĘCZNY SKAN RYNKU KRYPTO</b>\n───────────────────\n\n"
-                blocks = [row["digest_line"] for row in digest_rows]
-                for part in split_messages(header, blocks):
+                for part in split_messages(header, [row["digest_line"] for row in digest_rows]):
                     sent = await send_telegram_alert_async(http_client, part)
                     if sent is False:
                         logging.error("Ręczny digest nie wyszedł w całości.")
@@ -1057,22 +997,12 @@ async def main():
                     cache["LAST_CORE_TS"] = item["ts"]
                 save_cache(cache)
                 papers.append({
-                    "ts": item["ts"],
-                    "symbol": item["symbol"],
-                    "signal": item["signal"],
-                    "entry": item["entry"],
-                    "sl": item["sl"],
-                    "tp": item["tp"],
-                    "quote": item["quote"],
-                    "status": "OPEN",
-                    "exit": "",
-                    "bars": "",
-                    "note": "",
+                    "ts": item["ts"], "symbol": item["symbol"], "signal": item["signal"],
+                    "entry": item["entry"], "sl": item["sl"], "tp": item["tp"], "quote": item["quote"],
+                    "status": "OPEN", "exit": "", "bars": "", "note": "",
                 })
                 save_paper(papers)
-                sheet_rows.append([
-                    now_str, item["symbol"], item["status"], item["price"], f"RSI: {item['rsi']}",
-                ])
+                sheet_rows.append([now_str, item["symbol"], item["status"], item["price"], f"RSI: {item['rsi']}"])
                 await asyncio.sleep(0.3)
 
             if sheet and sheet_rows:
@@ -1085,8 +1015,7 @@ async def main():
             heartbeat_key = f"HEARTBEAT_{today_str}"
             if sent_count == 0 and github_event != "workflow_dispatch" and not cache.get(heartbeat_key):
                 note = (
-                    "📋 <b>Skan krypto V5.0</b>\n"
-                    "Brak nowych alertów.\n"
+                    "📋 <b>Skan krypto V5.0</b>\nBrak nowych alertów.\n"
                     f"Pary: <code>{success}/{len(SYMBOLS)}</code>. Bez danych: {h(missed)}.\n"
                     f"BTC dump: <code>{'tak' if btc_dumping else 'nie'}</code>."
                 )
