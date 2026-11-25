@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Skaner krypto V5.0
+Skaner krypto V5.0 (Premium PNG Card Alerts)
 
 Zostaje logika V4.0. W tej wersji:
 - Najwyżej 1 nowy alert na skan. Drugi setup dostaje BLOCK_.
 - Filtr 3h: alert tylko gdy zamknięcie świecy 4H było nie dawniej niż 3 godziny temu.
 - Świeży sygnał BTC/ETH (ten skan albo ostatnie COOLDOWN_HOURS) wycisza alty.
 - Cooldown pary po wysłanym alercie (domyślnie 12h).
-- Płynność, relative strength vs BTC, paper log, HTML Telegram.
+- Płynność, relative strength vs BTC, paper log, HTML Telegram + Premium PNG Card.
 - Poprawka Google Sheets: szuka zakładki Krypto, tworzy gdy brak, nie wywala skanu.
 
 CACHE: cache_krypto.json | PAPER: paper_krypto.csv
@@ -17,14 +17,23 @@ import asyncio
 import csv
 import datetime
 import html
+import io
 import json
 import logging
 import math
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import time
 from zoneinfo import ZoneInfo
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pillow"])
+    from PIL import Image, ImageDraw, ImageFont
 
 import ccxt.async_support as ccxt
 import gspread
@@ -183,6 +192,132 @@ def fail_row(symbol, reason):
         },
         "pending": None, "suppress_key": None, "paper_touched": False,
     }
+
+
+def _load_font(size, bold=False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+
+def _fit_font(draw, text, max_w, start_size, min_size=14, bold=True):
+    size = start_size
+    while size >= min_size:
+        font = _load_font(size, bold=bold)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        if (bbox[2] - bbox[0]) <= max_w:
+            return font
+        size -= 1
+    return _load_font(min_size, bold=bold)
+
+
+def render_alert_card_png(card: dict) -> bytes:
+    """Renders a 1200x675 (16:9) dark institutional PNG card for X & Telegram."""
+    W, H = 1200, 675
+    bg = (11, 15, 20)
+    card_bg = (16, 24, 33)
+    box_bg = (12, 18, 25)
+    border = (36, 50, 68)
+    green_border = (31, 77, 58)
+    red_border = (77, 36, 48)
+
+    white = (243, 247, 252)
+    muted = (143, 163, 184)
+    green = (61, 222, 154)
+    red = (248, 81, 73)
+    amber = (240, 195, 138)
+    blue = (88, 166, 255)
+
+    img = Image.new("RGB", (W, H), bg)
+    draw = ImageDraw.Draw(img)
+
+    f_kicker = _load_font(19, bold=True)
+    f_asset = _load_font(46, bold=True)
+    f_price = _load_font(42, bold=True)
+    f_box_lbl = _load_font(17, bold=True)
+    f_box_sub = _load_font(18, bold=False)
+    f_conf = _load_font(19, bold=False)
+    f_conf_b = _load_font(19, bold=True)
+    f_foot = _load_font(18, bold=False)
+
+    draw.rounded_rectangle([32, 28, W - 32, H - 28], radius=20, fill=card_bg, outline=border, width=2)
+
+    accent_col = amber if card["badge"] == "🟡" else green
+    draw.text((64, 54), card["setup_title"], fill=accent_col, font=f_kicker)
+    rsi_txt = f"RSI (4H): {card['rsi']}"
+    rsi_b = draw.textbbox((0, 0), rsi_txt, font=f_kicker)
+    draw.text((W - 64 - (rsi_b[2] - rsi_b[0]), 54), rsi_txt, fill=amber, font=f_kicker)
+
+    draw.text((64, 92), card["symbol"], fill=white, font=f_asset)
+    price_str = card["price_full"]
+    p_box = draw.textbbox((0, 0), price_str, font=f_price)
+    draw.text((W - 64 - (p_box[2] - p_box[0]), 94), price_str, fill=white, font=f_price)
+
+    draw.line([(64, 164), (W - 64, 164)], fill=border, width=2)
+
+    box_y0, box_y1 = 188, 372
+    gap = 20
+    box_w = (W - 128 - 2 * gap) // 3
+    inner_max_w = box_w - 40
+
+    # Box 1: Entry
+    x0 = 64
+    draw.rounded_rectangle([x0, box_y0, x0 + box_w, box_y1], radius=14, fill=box_bg, outline=border, width=2)
+    draw.text((x0 + 20, box_y0 + 18), card["entry_label"], fill=muted, font=f_box_lbl)
+    f_v0 = _fit_font(draw, card["entry_val"], inner_max_w, 30, 18, bold=True)
+    draw.text((x0 + 20, box_y0 + 56), card["entry_val"], fill=white, font=f_v0)
+    draw.text((x0 + 20, box_y0 + 110), f"Net R:R (after fees)  1 : {card['rr']}", fill=blue, font=f_box_sub)
+
+    # Box 2: Stop Loss / Exit
+    x1 = x0 + box_w + gap
+    draw.rounded_rectangle([x1, box_y0, x1 + box_w, box_y1], radius=14, fill=box_bg, outline=red_border, width=2)
+    draw.text((x1 + 20, box_y0 + 18), "4H CLOSE EXIT", fill=muted, font=f_box_lbl)
+    exit_main = f"{card['soft_sl']} (-{card['risk_pct']}%)"
+    f_v1 = _fit_font(draw, exit_main, inner_max_w, 28, 16, bold=True)
+    draw.text((x1 + 20, box_y0 + 56), exit_main, fill=red, font=f_v1)
+    hard_sub = f"Hard SL: {card['hard_sl']} (-{card['hard_risk_pct']}%)"
+    f_s1 = _fit_font(draw, hard_sub, inner_max_w, 18, 13, bold=False)
+    draw.text((x1 + 20, box_y0 + 110), hard_sub, fill=muted, font=f_s1)
+
+    # Box 3: Take Profit
+    x2 = x1 + box_w + gap
+    draw.rounded_rectangle([x2, box_y0, x2 + box_w, box_y1], radius=14, fill=box_bg, outline=green_border, width=2)
+    draw.text((x2 + 20, box_y0 + 18), card["tp_label"], fill=muted, font=f_box_lbl)
+    tp_main = f"{card['tp']} (+{card['tp_pct']}%)"
+    f_v2 = _fit_font(draw, tp_main, inner_max_w, 28, 16, bold=True)
+    draw.text((x2 + 20, box_y0 + 56), tp_main, fill=green, font=f_v2)
+    draw.text((x2 + 20, box_y0 + 110), f"Fee buffer: {FEE_PCT:.2f}% round-trip", fill=muted, font=f_box_sub)
+
+    # Confirmations panel
+    conf_y0 = 402
+    draw.rounded_rectangle([64, conf_y0, W - 64, 578], radius=14, fill=box_bg, outline=border, width=2)
+    draw.text((88, conf_y0 + 18), "MARKET CONFIRMATIONS", fill=blue, font=f_box_lbl)
+
+    draw.text((88, conf_y0 + 56), f"Trend 4H:    {card['trend_en']}", fill=white, font=f_conf)
+    draw.text((88, conf_y0 + 96), f"Structure:   {card['structure_en']}", fill=white, font=f_conf)
+
+    draw.text((610, conf_y0 + 56), f"Macro 1D:    {card['daily_en']}", fill=white, font=f_conf)
+    draw.text((610, conf_y0 + 96), f"Volume:      {card['volume_en']}", fill=green, font=f_conf_b)
+
+    # Footer
+    draw.text((64, 602), f"Namoralo Code  |  Kraken Spot  |  {card['timestamp_utc']}", fill=muted, font=f_foot)
+    right_txt = "Not financial advice"
+    rb = draw.textbbox((0, 0), right_txt, font=f_foot)
+    draw.text((W - 64 - (rb[2] - rb[0]), 602), right_txt, fill=muted, font=f_foot)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def init_google_sheet(default_tab="Krypto"):
@@ -386,7 +521,26 @@ async def send_telegram_alert_async(http_client, msg: str, custom_chat_id=None):
             response.raise_for_status()
             return True
         except Exception as exc:
-            logging.error("Błąd wysyłki Telegram (próba %s): %s", attempt, exc)
+            logging.error("Telegram sendMessage error (attempt %s): %s", attempt, exc)
+            if attempt == 1:
+                await asyncio.sleep(1.0)
+    return False
+
+
+async def send_telegram_photo_async(http_client, photo_bytes: bytes, caption: str, custom_chat_id=None):
+    chat_id = custom_chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_TOKEN or not chat_id:
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
+    files = {"photo": ("setup_card.png", photo_bytes, "image/png")}
+    for attempt in (1, 2):
+        try:
+            response = await http_client.post(url, data=data, files=files, timeout=20.0)
+            response.raise_for_status()
+            return True
+        except Exception as exc:
+            logging.error("Telegram sendPhoto error (attempt %s): %s", attempt, exc)
             if attempt == 1:
                 await asyncio.sleep(1.0)
     return False
@@ -395,7 +549,7 @@ async def send_telegram_alert_async(http_client, msg: str, custom_chat_id=None):
 def split_messages(header: str, blocks, limit=3800):
     if not blocks:
         return []
-    cont = "📋 <b>ciąg dalszy</b>\n───────────────────\n\n"
+    cont = "📋 <b>Continued</b>\n───────────────────\n\n"
     messages, current = [], header
     for block in blocks:
         if len(current) + len(block) > limit and current != header:
@@ -452,16 +606,16 @@ async def process_telegram_commands_async(http_client, cache, digest_rows):
             if is_status_command(text) and chat_allowed(chat_id):
                 reply_to = chat_id
             elif is_status_command(text):
-                logging.info("Pominięto /status z czatu %s", chat_id)
+                logging.info("Ignored /status from chat %s", chat_id)
         if reply_to is None:
             return
         blocks = [row["digest_line"] for row in digest_rows]
-        header = "📋 <b>AKTUALNY STAN RYNKU KRYPTO</b>\n───────────────────\n\n"
+        header = "📋 <b>CURRENT CRYPTO MARKET STATUS</b>\n───────────────────\n\n"
         for part in split_messages(header, blocks):
             await send_telegram_alert_async(http_client, part, custom_chat_id=reply_to)
             await asyncio.sleep(0.4)
     except Exception as exc:
-        logging.error("Błąd Telegram Commands: %s", exc)
+        logging.error("Telegram Commands error: %s", exc)
 
 
 async def fetch_ohlcv_async(exchange_inst, symbol, timeframe="4h", limit=OHLCV_4H_LIMIT):
@@ -737,12 +891,16 @@ async def process_symbol(
         vol_ratio = volume_ratio(last_row)
         if vol_ratio >= 120:
             volume_str = f"{vol_ratio}% średniej (wysoki)"
+            volume_en = f"{vol_ratio}% of avg (High)"
         elif vol_ratio <= 80:
             volume_str = f"{vol_ratio}% średniej (niski)"
+            volume_en = f"{vol_ratio}% of avg (Low)"
         elif vol_ratio == 0:
             volume_str = "brak danych"
+            volume_en = "No data"
         else:
             volume_str = f"{vol_ratio}% średniej (standard)"
+            volume_en = f"{vol_ratio}% of avg (Standard)"
 
         quote = quote_of(symbol)
         gbp_note = f" (≈ {money(price * usd_to_gbp, 'GBP')})" if quote == "USD" and usd_to_gbp else ""
@@ -792,7 +950,8 @@ async def process_symbol(
             soft_sl = max(1e-12, signal_low - (1.5 * atr))
             hard_sl = max(1e-12, min(soft_sl * 0.98, signal_low * 0.95))
             tp = sma20 if price < sma20 else bb_upper
-            tp_name = "Średnia SMA 20" if price < sma20 else "Górna BB 20"
+            tp_name_en = "SMA 20 Avg" if price < sma20 else "Upper BB 20"
+            tp_label_card = "TAKE PROFIT (SMA 20)" if price < sma20 else "TAKE PROFIT (UPPER BB)"
             risk_pct = round(((price - soft_sl) / price) * 100, 2)
             hard_risk_pct = round(((price - hard_sl) / price) * 100, 2)
             tp_pct = round(((tp - price) / price) * 100, 2)
@@ -809,27 +968,49 @@ async def process_symbol(
                 suppress_key = f"BLOCK_{symbol}_{ts_closed}"
             else:
                 bits = candle_bits(last_row) or {}
-                confirmations = [
-                    f"📈 <b>Trend 4H:</b> {h(trend_txt)}",
-                    f"🛡 <b>Kontekst 1D:</b> {h(daily_txt)}",
+                trend_en = "Above 200 SMA" if above_4h else "Below 200 SMA"
+                daily_rsi_val = None
+                if df_1d is not None and len(df_1d) >= 210:
+                    d_frame = calculate_indicators(df_1d)
+                    d_row, _ = closed_pair(d_frame)
+                    if d_row is not None:
+                        daily_rsi_val = fnum(d_row, "rsi")
+                daily_en = "Above 200 SMA" if daily_ok else "Below 200 SMA"
+                if daily_rsi_val is not None:
+                    daily_en += f" (RSI {daily_rsi_val:.1f})"
+
+                structure_parts = []
+                if is_pinbar:
+                    structure_parts.append(f"Pinbar ({pinbar_txt})")
+                if bits.get("bb"):
+                    structure_parts.append("Lower BB (20,2)")
+                if bits.get("green"):
+                    structure_parts.append("Bullish 4H Close")
+                structure_en = " + ".join(structure_parts) if structure_parts else "Demand Zone"
+
+                confirmations_en = [
+                    f"📈 <b>4H Trend:</b> {h(trend_en)}",
+                    f"🛡 <b>1D Context:</b> {h(daily_en)}",
                 ]
                 if final_signal == "BUY_COUNTER":
-                    confirmations.append("⚠️ <b>Kontrtrend:</b> 4H pod SMA200, 1D nadal nad SMA200. Mniejszy rozmiar.")
+                    confirmations_en.append("⚠️ <b>Countertrend:</b> 4H below 200 SMA while 1D holds above. Reduced size.")
                 if is_pinbar:
-                    confirmations.append(f"🕯 <b>Knot popytowy 4H:</b> {h(pinbar_txt)} (próg {int(pinbar_wick * 100)}%)")
+                    confirmations_en.append(f"🕯 <b>4H Demand Wick:</b> {h(pinbar_txt)} (min {int(pinbar_wick * 100)}%)")
                 if bits.get("green"):
-                    confirmations.append("🟩 <b>Bycze zamknięcie</b> świecy 4H")
+                    confirmations_en.append("🟩 <b>Bullish 4H candle close</b>")
                 if bits.get("bb"):
-                    confirmations.append("📉 <b>Test dolnej wstęgi Bollingera (20, 2)</b>")
+                    confirmations_en.append("📉 <b>Tested Lower Bollinger Band (20, 2)</b>")
                 if stoch_turning_up(last_row, prev_row):
-                    confirmations.append(f"🔄 <b>Stochastic RSI w górę</b> (%K: <code>{h(fnum(last_row, 'stoch_k'))}</code>)")
-                confirmations.append(f"📊 <b>Wolumen:</b> {h(volume_str)}")
+                    confirmations_en.append(f"🔄 <b>Stochastic RSI turning up</b> (%K: <code>{h(fnum(last_row, 'stoch_k'))}</code>)")
+                confirmations_en.append(f"📊 <b>Volume:</b> {h(volume_en)}")
                 if not is_core and alt_12h is not None and btc_ret_12h is not None:
-                    confirmations.append(f"📎 <b>12h vs BTC:</b> {alt_12h:.1f}% / BTC {btc_ret_12h:.1f}%")
-                conf_msg = "\n" + "\n".join(confirmations)
+                    confirmations_en.append(f"📎 <b>12h vs BTC:</b> {alt_12h:.1f}% / BTC {btc_ret_12h:.1f}%")
+                conf_msg = "\n" + "\n".join(confirmations_en)
 
                 if rr_ratio >= 1.5:
-                    entry_line = f"├ 🟢 <b>Kupuj (Market):</b> <code>{h(money(price, quote))}</code>"
+                    entry_line = f"├ 🟢 <b>Buy (Market):</b> <code>{h(money(price, quote))}</code>"
+                    entry_label_card = "ENTRY (MARKET)"
+                    entry_val_card = money(price, quote)
                     badge = "🟢"
                 else:
                     limit_price = (price + signal_low) / 2
@@ -837,34 +1018,74 @@ async def process_symbol(
                     lim_tp = round(((tp - limit_price) / limit_price) * 100, 2)
                     lim_rr = round(max(0.0, lim_tp - FEE_PCT) / (lim_risk + FEE_PCT), 2) if (lim_risk + FEE_PCT) > 0 else rr_ratio
                     entry_line = (
-                        f"├ 🟡 <b>Ustaw Limit (50% knota):</b> <code>{h(money(limit_price, quote))}</code> "
-                        f"(R:R limitu <code>1 : {lim_rr}</code>)"
+                        f"├ 🟡 <b>Limit Order (50% wick):</b> <code>{h(money(limit_price, quote))}</code> "
+                        f"(Limit R:R <code>1 : {lim_rr}</code>)"
                     )
+                    entry_label_card = "LIMIT ENTRY (50% WICK)"
+                    entry_val_card = f"{money(limit_price, quote)} (1:{lim_rr})"
                     badge = "🟡"
 
                 if final_signal == "BUY_COUNTER":
-                    header = f"⚠️ <b>KONTRTREND 4H — TYLKO PRZY TRENDZIE 1D</b> {badge}"
+                    header = f"⚠️ <b>COUNTERTREND 4H - 1D UPTREND ONLY</b> {badge}"
+                    setup_title_card = "COUNTERTREND 4H SETUP (1D UPTREND)"
                 elif final_signal == "BUY_BOUNCE":
-                    header = f"🟡 <b>STREFA ODBICIA (4H)</b> {badge}"
+                    header = f"🟡 <b>BOUNCE ZONE (SWING 4H)</b> {badge}"
+                    setup_title_card = "BOUNCE ZONE OPPORTUNITY (SWING 4H)"
+                elif final_signal == "BUY_PINBAR":
+                    header = f"🕯️ <b>PINBAR REBOUND (SWING 4H)</b> {badge}"
+                    setup_title_card = "PINBAR REBOUND OPPORTUNITY (SWING 4H)"
                 else:
-                    header = f"⚡️ <b>ODBICIE 4H</b> {badge}"
+                    header = f"⚡️ <b>QUICK REBOUND OPPORTUNITY (SWING 4H)</b> {badge}"
+                    setup_title_card = "QUICK REBOUND OPPORTUNITY (SWING 4H)"
 
-                fx_line = f"\n💷 <b>Orientacyjnie:</b> <code>{h(money(price * usd_to_gbp, 'GBP'))}</code>" if gbp_note else ""
+                fx_line = f"\n💷 <b>Approx GBP:</b> <code>{h(money(price * usd_to_gbp, 'GBP'))}</code>" if gbp_note else ""
                 body = (
                     f"{header}\n───────────────────\n"
-                    f"{icon} <b>Para:</b> {link(symbol, tv_link)}\n"
-                    f"💰 <b>Cena ({h(quote)}):</b> <code>{h(money(price, quote))}</code>{fx_line}\n"
+                    f"{icon} <b>Asset:</b> {link(symbol, tv_link)}\n"
+                    f"💰 <b>Market Price ({h(quote)}):</b> <code>{h(money(price, quote))}</code>{fx_line}\n"
                     f"📊 <b>RSI (4H):</b> <code>{h(rsi_4h)}</code>\n\n"
-                    f"⚙️ <b>PLAN TRANSAKCYJNY ({h(quote)})</b>\n{entry_line}\n"
-                    f"├ ⚠️ <b>Wyjście (zamknięcie 4H pod):</b> <code>{h(money(soft_sl, quote))}</code> (<code>-{risk_pct}%</code>)\n"
-                    f"├ 🛡 <b>Awaryjny SL:</b> <code>{h(money(hard_sl, quote))}</code> (<code>-{hard_risk_pct}%</code>)\n"
-                    f"├ 🎯 <b>Cel ({h(tp_name)}):</b> <code>{h(money(tp, quote))}</code> (<code>+{tp_pct}%</code>)\n"
-                    f"└ ⚖️ <b>R:R netto (po {FEE_PCT:.2f}%):</b> <code>1 : {rr_ratio}</code>\n\n"
-                    f"📈 <b>Potwierdzenia:</b>{conf_msg}\n\n"
-                    f"👁 {link('Wykres na TradingView', tv_link)}"
+                    f"⚙️ <b>TRADE PLAN ({h(quote)})</b>\n{entry_line}\n"
+                    f"├ ⚠️ <b>Exit (4H Close Below):</b> <code>{h(money(soft_sl, quote))}</code> (<code>-{risk_pct}%</code>)\n"
+                    f"├ 🛡 <b>Emergency SL:</b> <code>{h(money(hard_sl, quote))}</code> (<code>-{hard_risk_pct}%</code>)\n"
+                    f"├ 🎯 <b>Take Profit ({h(tp_name_en)}):</b> <code>{h(money(tp, quote))}</code> (<code>+{tp_pct}%</code>)\n"
+                    f"└ ⚖️ <b>R:R Ratio (Net after {FEE_PCT:.2f}%):</b> <code>1 : {rr_ratio}</code>\n\n"
+                    f"📈 <b>Market Confirmations:</b>{conf_msg}\n\n"
+                    f"👁 {link('View Chart on TradingView', tv_link)}"
                 )
+
+                caption = (
+                    f"{header}\n"
+                    f"{icon} <b>{h(symbol)}</b>  |  Price: <code>{h(money(price, quote))}</code>  |  RSI: <code>{h(rsi_4h)}</code>\n"
+                    f"⚖️ Net R:R: <code>1 : {rr_ratio}</code>  |  👁 {link('TradingView Chart', tv_link)}"
+                )
+
+                ts_utc_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                card_payload = {
+                    "setup_title": setup_title_card,
+                    "badge": badge,
+                    "symbol": symbol,
+                    "price_full": money(price, quote),
+                    "rsi": rsi_4h,
+                    "entry_label": entry_label_card,
+                    "entry_val": entry_val_card,
+                    "soft_sl": money(soft_sl, quote),
+                    "risk_pct": risk_pct,
+                    "hard_sl": money(hard_sl, quote),
+                    "hard_risk_pct": hard_risk_pct,
+                    "tp_label": tp_label_card,
+                    "tp": money(tp, quote),
+                    "tp_pct": tp_pct,
+                    "rr": rr_ratio,
+                    "trend_en": trend_en,
+                    "daily_en": daily_en,
+                    "structure_en": structure_en,
+                    "volume_en": volume_en,
+                    "timestamp_utc": ts_utc_str,
+                }
+
                 pending = {
-                    "body": body, "symbol": symbol, "status": status_txt,
+                    "body": body, "caption": caption, "card_payload": card_payload,
+                    "symbol": symbol, "status": status_txt,
                     "price": money(price, quote), "rsi": rsi_4h, "rr": rr_ratio,
                     "is_core": is_core, "ts": ts_closed, "candle_key": candle_key,
                     "signal": final_signal, "entry": price, "sl": soft_sl, "tp": tp, "quote": quote,
@@ -975,18 +1196,21 @@ async def main():
             save_cache(cache)
 
             if github_event == "workflow_dispatch" and digest_rows:
-                header = "🎯 <b>RĘCZNY SKAN RYNKU KRYPTO</b>\n───────────────────\n\n"
+                header = "🎯 <b>MANUAL CRYPTO MARKET SCAN</b>\n───────────────────\n\n"
                 for part in split_messages(header, [row["digest_line"] for row in digest_rows]):
                     sent = await send_telegram_alert_async(http_client, part)
                     if sent is False:
-                        logging.error("Ręczny digest nie wyszedł w całości.")
+                        logging.error("Manual digest delivery incomplete.")
                         break
                     await asyncio.sleep(0.4)
 
             sheet_rows = []
             sent_count = 0
             for item in kept:
-                sent = await send_telegram_alert_async(http_client, item["body"])
+                png_bytes = render_alert_card_png(item["card_payload"])
+                sent = await send_telegram_photo_async(http_client, png_bytes, item["caption"])
+                if sent is not True:
+                    sent = await send_telegram_alert_async(http_client, item["body"])
                 if sent is not True:
                     logging.error("Nie blokuję %s — Telegram nie przyjął alertu.", item["candle_key"])
                     continue
@@ -1015,9 +1239,9 @@ async def main():
             heartbeat_key = f"HEARTBEAT_{today_str}"
             if sent_count == 0 and github_event != "workflow_dispatch" and not cache.get(heartbeat_key):
                 note = (
-                    "📋 <b>Skan krypto V5.0</b>\nBrak nowych alertów.\n"
-                    f"Pary: <code>{success}/{len(SYMBOLS)}</code>. Bez danych: {h(missed)}.\n"
-                    f"BTC dump: <code>{'tak' if btc_dumping else 'nie'}</code>."
+                    "📋 <b>Crypto Scan V5.0</b>\nNo new alerts.\n"
+                    f"Pairs scanned: <code>{success}/{len(SYMBOLS)}</code>. Missing data: {h(missed)}.\n"
+                    f"BTC dump: <code>{'yes' if btc_dumping else 'no'}</code>."
                 )
                 sent = await send_telegram_alert_async(http_client, note)
                 if sent is True:
@@ -1032,9 +1256,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as exc:
-        logging.critical("KRYTYCZNY BŁĄD SKANERA KRYPTO: %s", exc, exc_info=True)
+        logging.critical("CRITICAL CRYPTO SCANNER ERROR: %s", exc, exc_info=True)
         clean = h(str(exc))[:500]
-        err_msg = f"🚨 <b>KRYTYCZNY BŁĄD SKANERA KRYPTO</b>\n<code>{clean}</code>"
+        err_msg = f"🚨 <b>CRITICAL CRYPTO SCANNER ERROR</b>\n<code>{clean}</code>"
 
         async def send_critical_error():
             async with httpx.AsyncClient() as http_client:
