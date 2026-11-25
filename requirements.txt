@@ -6,3 +6,4 @@ google-auth
 ta
 requests
 pytz
+pillow
