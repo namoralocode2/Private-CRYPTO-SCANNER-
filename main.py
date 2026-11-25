@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Skaner krypto V5.0 (Premium PNG Card Alerts)
+Skaner krypto V5.0 (Premium 4:5 PNG Card Alerts)
 
 Zostaje logika V4.0. W tej wersji:
 - Najwyżej 1 nowy alert na skan. Drugi setup dostaje BLOCK_.
 - Filtr 3h: alert tylko gdy zamknięcie świecy 4H było nie dawniej niż 3 godziny temu.
 - Świeży sygnał BTC/ETH (ten skan albo ostatnie COOLDOWN_HOURS) wycisza alty.
 - Cooldown pary po wysłanym alercie (domyślnie 12h).
-- Płynność, relative strength vs BTC, paper log, HTML Telegram + Premium PNG Card.
+- Płynność, relative strength vs BTC, paper log, HTML Telegram + Premium 4:5 PNG Card.
 - Poprawka Google Sheets: szuka zakładki Krypto, tworzy gdy brak, nie wywala skanu.
 
 CACHE: cache_krypto.json | PAPER: paper_krypto.csv
@@ -221,8 +221,8 @@ def _fit_font(draw, text, max_w, start_size, min_size=14, bold=True):
 
 
 def render_alert_card_png(card: dict) -> bytes:
-    """Renders a 1200x675 (16:9) dark institutional PNG card for X & Telegram."""
-    W, H = 1200, 675
+    """Renders a 1080x1350 (4:5) dark institutional PNG card for X & Telegram."""
+    W, H = 1080, 1350
     bg = (11, 15, 20)
     card_bg = (16, 24, 33)
     box_bg = (12, 18, 25)
@@ -240,79 +240,81 @@ def render_alert_card_png(card: dict) -> bytes:
     img = Image.new("RGB", (W, H), bg)
     draw = ImageDraw.Draw(img)
 
-    f_kicker = _load_font(19, bold=True)
-    f_asset = _load_font(46, bold=True)
-    f_price = _load_font(42, bold=True)
-    f_box_lbl = _load_font(17, bold=True)
-    f_box_sub = _load_font(18, bold=False)
-    f_conf = _load_font(19, bold=False)
-    f_conf_b = _load_font(19, bold=True)
-    f_foot = _load_font(18, bold=False)
+    f_kicker = _load_font(22, bold=True)
+    f_rsi = _load_font(21, bold=True)
+    f_asset = _load_font(56, bold=True)
+    f_price = _load_font(52, bold=True)
+    f_box_lbl = _load_font(20, bold=True)
+    f_box_sub = _load_font(21, bold=False)
+    f_conf_hdr = _load_font(21, bold=True)
+    f_conf = _load_font(22, bold=False)
+    f_conf_b = _load_font(22, bold=True)
+    f_foot = _load_font(20, bold=False)
 
-    draw.rounded_rectangle([32, 28, W - 32, H - 28], radius=20, fill=card_bg, outline=border, width=2)
+    draw.rounded_rectangle([32, 32, W - 32, H - 32], radius=24, fill=card_bg, outline=border, width=2)
 
     accent_col = amber if card["badge"] == "🟡" else green
-    draw.text((64, 54), card["setup_title"], fill=accent_col, font=f_kicker)
-    rsi_txt = f"RSI (4H): {card['rsi']}"
-    rsi_b = draw.textbbox((0, 0), rsi_txt, font=f_kicker)
-    draw.text((W - 64 - (rsi_b[2] - rsi_b[0]), 54), rsi_txt, fill=amber, font=f_kicker)
+    draw.text((68, 66), card["setup_title"], fill=accent_col, font=f_kicker)
 
-    draw.text((64, 92), card["symbol"], fill=white, font=f_asset)
+    draw.text((68, 114), card["symbol"], fill=white, font=f_asset)
     price_str = card["price_full"]
     p_box = draw.textbbox((0, 0), price_str, font=f_price)
-    draw.text((W - 64 - (p_box[2] - p_box[0]), 94), price_str, fill=white, font=f_price)
+    draw.text((W - 68 - (p_box[2] - p_box[0]), 118), price_str, fill=white, font=f_price)
 
-    draw.line([(64, 164), (W - 64, 164)], fill=border, width=2)
+    rsi_txt = f"RSI (4H):  {card['rsi']}   |   {card['daily_en']}"
+    draw.text((68, 194), rsi_txt, fill=amber, font=f_rsi)
 
-    box_y0, box_y1 = 188, 372
-    gap = 20
-    box_w = (W - 128 - 2 * gap) // 3
-    inner_max_w = box_w - 40
+    draw.line([(68, 244), (W - 68, 244)], fill=border, width=2)
+
+    # Stacked trade plan cards (3 full-width rows)
+    box_x0, box_x1 = 68, W - 68
+    inner_max_w = (box_x1 - box_x0) - 56
+    box_h = 176
+    gap = 24
 
     # Box 1: Entry
-    x0 = 64
-    draw.rounded_rectangle([x0, box_y0, x0 + box_w, box_y1], radius=14, fill=box_bg, outline=border, width=2)
-    draw.text((x0 + 20, box_y0 + 18), card["entry_label"], fill=muted, font=f_box_lbl)
-    f_v0 = _fit_font(draw, card["entry_val"], inner_max_w, 30, 18, bold=True)
-    draw.text((x0 + 20, box_y0 + 56), card["entry_val"], fill=white, font=f_v0)
-    draw.text((x0 + 20, box_y0 + 110), f"Net R:R (after fees)  1 : {card['rr']}", fill=blue, font=f_box_sub)
+    y0 = 276
+    draw.rounded_rectangle([box_x0, y0, box_x1, y0 + box_h], radius=16, fill=box_bg, outline=border, width=2)
+    draw.text((box_x0 + 28, y0 + 22), card["entry_label"], fill=muted, font=f_box_lbl)
+    f_v0 = _fit_font(draw, card["entry_val"], inner_max_w, 42, 24, bold=True)
+    draw.text((box_x0 + 28, y0 + 62), card["entry_val"], fill=white, font=f_v0)
+    draw.text((box_x0 + 28, y0 + 124), f"Net R:R (after {FEE_PCT:.2f}% fees):  1 : {card['rr']}", fill=blue, font=f_box_sub)
 
     # Box 2: Stop Loss / Exit
-    x1 = x0 + box_w + gap
-    draw.rounded_rectangle([x1, box_y0, x1 + box_w, box_y1], radius=14, fill=box_bg, outline=red_border, width=2)
-    draw.text((x1 + 20, box_y0 + 18), "4H CLOSE EXIT", fill=muted, font=f_box_lbl)
+    y1 = y0 + box_h + gap
+    draw.rounded_rectangle([box_x0, y1, box_x1, y1 + box_h], radius=16, fill=box_bg, outline=red_border, width=2)
+    draw.text((box_x0 + 28, y1 + 22), "4H CLOSE EXIT", fill=muted, font=f_box_lbl)
     exit_main = f"{card['soft_sl']} (-{card['risk_pct']}%)"
-    f_v1 = _fit_font(draw, exit_main, inner_max_w, 28, 16, bold=True)
-    draw.text((x1 + 20, box_y0 + 56), exit_main, fill=red, font=f_v1)
-    hard_sub = f"Hard SL: {card['hard_sl']} (-{card['hard_risk_pct']}%)"
-    f_s1 = _fit_font(draw, hard_sub, inner_max_w, 18, 13, bold=False)
-    draw.text((x1 + 20, box_y0 + 110), hard_sub, fill=muted, font=f_s1)
+    f_v1 = _fit_font(draw, exit_main, inner_max_w, 40, 22, bold=True)
+    draw.text((box_x0 + 28, y1 + 62), exit_main, fill=red, font=f_v1)
+    hard_sub = f"Emergency SL:  {card['hard_sl']} (-{card['hard_risk_pct']}%)"
+    f_s1 = _fit_font(draw, hard_sub, inner_max_w, 21, 15, bold=False)
+    draw.text((box_x0 + 28, y1 + 124), hard_sub, fill=muted, font=f_s1)
 
     # Box 3: Take Profit
-    x2 = x1 + box_w + gap
-    draw.rounded_rectangle([x2, box_y0, x2 + box_w, box_y1], radius=14, fill=box_bg, outline=green_border, width=2)
-    draw.text((x2 + 20, box_y0 + 18), card["tp_label"], fill=muted, font=f_box_lbl)
+    y2 = y1 + box_h + gap
+    draw.rounded_rectangle([box_x0, y2, box_x1, y2 + box_h], radius=16, fill=box_bg, outline=green_border, width=2)
+    draw.text((box_x0 + 28, y2 + 22), card["tp_label"], fill=muted, font=f_box_lbl)
     tp_main = f"{card['tp']} (+{card['tp_pct']}%)"
-    f_v2 = _fit_font(draw, tp_main, inner_max_w, 28, 16, bold=True)
-    draw.text((x2 + 20, box_y0 + 56), tp_main, fill=green, font=f_v2)
-    draw.text((x2 + 20, box_y0 + 110), f"Fee buffer: {FEE_PCT:.2f}% round-trip", fill=muted, font=f_box_sub)
+    f_v2 = _fit_font(draw, tp_main, inner_max_w, 40, 22, bold=True)
+    draw.text((box_x0 + 28, y2 + 62), tp_main, fill=green, font=f_v2)
+    draw.text((box_x0 + 28, y2 + 124), f"Fee buffer:  {FEE_PCT:.2f}% round-trip", fill=muted, font=f_box_sub)
 
     # Confirmations panel
-    conf_y0 = 402
-    draw.rounded_rectangle([64, conf_y0, W - 64, 578], radius=14, fill=box_bg, outline=border, width=2)
-    draw.text((88, conf_y0 + 18), "MARKET CONFIRMATIONS", fill=blue, font=f_box_lbl)
+    conf_y0, conf_y1 = y2 + box_h + 28, 1234
+    draw.rounded_rectangle([box_x0, conf_y0, box_x1, conf_y1], radius=16, fill=box_bg, outline=border, width=2)
+    draw.text((box_x0 + 28, conf_y0 + 24), "MARKET CONFIRMATIONS", fill=blue, font=f_conf_hdr)
 
-    draw.text((88, conf_y0 + 56), f"Trend 4H:    {card['trend_en']}", fill=white, font=f_conf)
-    draw.text((88, conf_y0 + 96), f"Structure:   {card['structure_en']}", fill=white, font=f_conf)
-
-    draw.text((610, conf_y0 + 56), f"Macro 1D:    {card['daily_en']}", fill=white, font=f_conf)
-    draw.text((610, conf_y0 + 96), f"Volume:      {card['volume_en']}", fill=green, font=f_conf_b)
+    draw.text((box_x0 + 28, conf_y0 + 74), f"Trend 4H:    {card['trend_en']}", fill=white, font=f_conf)
+    draw.text((box_x0 + 28, conf_y0 + 128), f"Structure:   {card['structure_en']}", fill=white, font=f_conf)
+    draw.text((box_x0 + 28, conf_y0 + 182), f"Macro 1D:    {card['daily_en']}", fill=white, font=f_conf)
+    draw.text((box_x0 + 28, conf_y0 + 236), f"Volume:      {card['volume_en']}", fill=green, font=f_conf_b)
 
     # Footer
-    draw.text((64, 602), f"Namoralo Code  |  Kraken Spot  |  {card['timestamp_utc']}", fill=muted, font=f_foot)
+    draw.text((68, 1266), f"Namoralo Code  |  Kraken Spot  |  {card['timestamp_utc']}", fill=muted, font=f_foot)
     right_txt = "Not financial advice"
     rb = draw.textbbox((0, 0), right_txt, font=f_foot)
-    draw.text((W - 64 - (rb[2] - rb[0]), 602), right_txt, fill=muted, font=f_foot)
+    draw.text((W - 68 - (rb[2] - rb[0]), 1266), right_txt, fill=muted, font=f_foot)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
